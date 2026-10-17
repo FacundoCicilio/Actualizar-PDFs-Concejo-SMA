@@ -20,7 +20,7 @@ jobs:
           pip install -r requirements.txt
       - name: Run tests
         run: |
-          python -m unittest -v test_store
+          python -m unittest discover -v
       - name: Run auto_fetch
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

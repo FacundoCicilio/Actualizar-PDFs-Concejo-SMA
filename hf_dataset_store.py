@@ -11,7 +11,7 @@ from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 
 DATASET_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or "Facucici/actas-sma-data"
 INDEX_PATH = "index/index.json"
-PROCESSOR_VERSION = 27  # única versión para app y cron: subirla hace que el cron reprocese lo anterior
+PROCESSOR_VERSION = 28  # única versión para app y cron: subirla hace que el cron reprocese lo anterior
 DEBUG = os.getenv("DEBUG", "1").strip().lower() in {"1", "true", "yes", "y"}
 
 # Leídos al llamar, no al importar: en Streamlit los secrets pasan a env recién tras el primer acceso a st.secrets.

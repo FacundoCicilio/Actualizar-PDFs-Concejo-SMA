@@ -1,32 +1,25 @@
 import os
 import re
-import json
 import time
-import hashlib
 import argparse
-import unicodedata
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
  
 import requests
-import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
-from hf_dataset_store import (DATASET_REPO_ID, PROCESSOR_VERSION, DEBUG, log, dbg, normalize_session_number, make_doc_id, api,
+from actas_parser import process_pdf, sha256_bytes
+from hf_dataset_store import (DATASET_REPO_ID, PROCESSOR_VERSION, DEBUG, log, dbg, make_doc_id, api,
                               load_processed_json, load_index, save_index, upload_pdf_and_json)
  
 SOURCE_URL = os.getenv("SOURCE_URL", "").strip()
- 
  
 UA = os.getenv(
     "HTTP_USER_AGENT",
     "Mozilla/5.0 (compatible; ObservatorioActasBot/2.0; +https://github.com/FacundoCicilio/Actualizar-PDFs-Concejo-SMA)"
 )
  
- 
 session = requests.Session()
 session.headers.update({"User-Agent": UA})
- 
  
 def must_env(name):
     val = os.getenv(name, "").strip()
@@ -34,34 +27,10 @@ def must_env(name):
         raise SystemExit(f"Falta variable de entorno {name}.")
     return val
  
- 
-def normalize_space(s):
-    s = (s or "").replace("\u00a0", " ")
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
- 
-def _strip_accents(s):
-    return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn")
- 
-def normalize_text(s):
-    if not s: return ""
-    s = str(s).lower()
-    s = _strip_accents(s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
- 
- 
 def canonicalize_url(url):
     parsed = urlparse((url or "").strip())
     parsed = parsed._replace(fragment="")
     return urlunparse(parsed)
- 
-def sha256_bytes(data):
-    h = hashlib.sha256()
-    h.update(data)
-    return h.hexdigest()
- 
  
 def safe_filename_from_url(url, content_disposition=None):
     if content_disposition:
@@ -77,409 +46,6 @@ def safe_filename_from_url(url, content_disposition=None):
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
     if not name.lower().endswith(".pdf"): name += ".pdf"
     return name
- 
-BOILERPLATE_PATTERNS = [
-    r"Donar\s+Órganos\s+y\s+Sangre\s+es\s+Donar\s+Vida",
-    r"Donar\s+Organos\s+y\s+Sangre\s+es\s+Donar\s+Vida",
-    r"Inf[oó]rmese,?\s*sea\s+donante",
-    r"\bsea\s+donante\b",
-    r"(?:https?:\/\/)?(?:www\.)?incucai\.gov\.ar",
-    r"CONCEJO\s+DELIBERANTE\s+SAN\s+MARTIN\s+DE\s+LOS\s+ANDES",
-    r"CONCEJO\s+DELIBERANTE",
-    r"P[áa]gina\s+\d+\s+de\s+\d+",
-    r"\bP[áa]g\.\s*\d+\b",
-]
- 
-def remove_boilerplate_lines(text):
-    lines = (text or "").splitlines()
-    cleaned = []
-    for ln in lines:
-        ln_strip = ln.strip()
-        if not ln_strip:
-            cleaned.append("")
-            continue
-        if any(re.search(p, ln_strip, re.IGNORECASE) for p in BOILERPLATE_PATTERNS):
-            continue
-        ln_strip = re.sub(r"^[\-\•\●\·\*]+\s*", "", ln_strip).strip()
-        cleaned.append(ln_strip)
-    return "\n".join(cleaned)
- 
-def remove_boilerplate_global(text):
-    t = text or ""
-    for p in BOILERPLATE_PATTERNS:
-        t = re.sub(p, " ", t, flags=re.IGNORECASE)
-    t = re.sub(r"[ \t]{2,}", " ", t)
-    t = re.sub(r"\n\s+\n", "\n\n", t)
-    return t.strip()
- 
-def extract_text_from_pdf_bytes(pdf_bytes, max_pages=80):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    out = []
-    n_pages = min(len(doc), max_pages)
-    for i in range(n_pages):
-        page = doc.load_page(i)
-        words = page.get_text("words") or []
-        if not words: continue
-        words.sort(key=lambda w: (round(w[1], 1), round(w[0], 1)))
-        line_bins = {}
-        for w in words:
-            bin_y = int(round(w[1] / 3.0))
-            line_bins.setdefault(bin_y, []).append(w)
-        for bin_y in sorted(line_bins.keys()):
-            line_words = sorted(line_bins[bin_y], key=lambda w: w[0])
-            txt = " ".join([w[4] for w in line_words]).strip()
-            if txt: out.append(txt)
-        out.append("")
-    doc.close()
-    return "\n".join(out)
- 
-def extract_cover_lines(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    if len(doc) == 0: return []
-    page = doc.load_page(0)
-    words = page.get_text("words") or []
-    doc.close()
-    if not words: return []
-    words.sort(key=lambda w: (round(w[1], 1), round(w[0], 1)))
-    line_bins = {}
-    for w in words:
-        bin_y = int(round(w[1] / 3.0))
-        line_bins.setdefault(bin_y, []).append(w)
-    lines = []
-    for bin_y in sorted(line_bins.keys()):
-        line_words = sorted(line_bins[bin_y], key=lambda w: w[0])
-        txt = " ".join([w[4] for w in line_words]).strip()
-        if txt: lines.append(txt)
-    return lines
- 
-MONTHS = {
-    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
-    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
-    "noviembre": 11, "diciembre": 12,
-}
- 
-def parse_spanish_date_any(s):
-    s = (s or "").strip()
-    m = re.search(r"\b(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóúñÑ]+)\s+de\s+(20\d{2})\b", s, re.IGNORECASE)
-    if not m: return None
-    d, mn, y = int(m.group(1)), m.group(2).lower(), int(m.group(3))
-    mo = MONTHS.get(mn)
-    if not mo: return None
-    try: return datetime(y, mo, d)
-    except: return None
- 
-def parse_date_any(s):
-    if not s: return datetime.min
-    s = str(s).strip()
-    m = re.match(r"(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})", s)
-    if m:
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if y < 100: y += 2000
-        try: return datetime(y, mo, d)
-        except: return datetime.min
-    dt = parse_spanish_date_any(s)
-    if dt: return dt
-    return datetime.min
- 
-def infer_num_year_from_filename(filename):
-    if not filename: return (None, None)
-    f = filename.lower()
-    m = re.search(r"\bno[-_\s]*0*(\d{1,3})[-_](\d{2})\b", f)
-    if m: return (int(m.group(1)), 2000 + int(m.group(2)))
-    m = re.search(r"\bno[-_\s]*0*(\d{1,3})[-_](20\d{2})\b", f)
-    if m: return (int(m.group(1)), int(m.group(2)))
-    m = re.search(r"\b[-_](\d{1,3})[-_](20\d{2})\b", f)
-    if m: return (int(m.group(1)), int(m.group(2)))
-    m = re.search(r"\b(\d{1,3})[-_](\d{2})\b", f)
-    if m: return (int(m.group(1)), 2000 + int(m.group(2)))
-    return (None, None)
- 
- 
-def extract_box_header_info(pdf_bytes):
-    lines = extract_cover_lines(pdf_bytes)
-    if not lines: return {}
-    page_text = "\n".join(lines)
-    stype = None
-    if re.search(r"\bORDEN\s+DEL\s+D[IÍ]A\b", page_text, re.IGNORECASE): stype = "ORDEN DEL DIA"
-    elif re.search(r"\bACTA\b", page_text, re.IGNORECASE): stype = "ACTA"
-    mnum = re.search(r"\bSESIO[NÓO]\s+(?:ORDINARIA|EXTRAORDINARIA|ESPECIAL)\s+N(?:ro|°|º|o)?[:\.]?\s*0*(\d{1,3})\b", page_text, re.IGNORECASE)
-    sn = str(int(mnum.group(1))) if mnum else None
-    my = re.search(r"\bA[ñn]o\s+(20\d{2})\b", page_text, re.IGNORECASE)
-    sy = int(my.group(1)) if my else None
-    dt = parse_spanish_date_any(page_text)
-    date_str = None
-    if dt:
-        date_str = dt.strftime("%d/%m/%Y")
-        if sy is None: sy = dt.year
-    out = {}
-    if stype: out["session_type"] = stype
-    if sn: out["session_number"] = sn
-    if sy: out["session_year"] = sy
-    if date_str: out["date"] = date_str
-    return out
- 
-def parse_metadata(text, filename, box):
-    t = text or ""
-    head = "\n".join(t.splitlines()[:200])
-    session_type = box.get("session_type")
-    session_number = box.get("session_number")
-    session_year = box.get("session_year")
-    date_str = box.get("date")
-    f_num, f_year = infer_num_year_from_filename(filename or "")
-    if session_number is None and f_num is not None: session_number = str(f_num)
-    if session_year is None and f_year is not None: session_year = f_year
-    if session_type is None:
-        if re.search(r"orden\s+del\s+d[ií]a", head, re.IGNORECASE): session_type = "ORDEN DEL DIA"
-        elif re.search(r"\bacta\b", head, re.IGNORECASE): session_type = "ACTA"
-    if date_str is None:
-        m = re.search(r"San\s+Mart[ií]n\s+de\s+los\s+Andes\s*,?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})", head, re.IGNORECASE)
-        if m: date_str = m.group(1)
-    if date_str is None:
-        m = re.search(r"(\d{1,2}\s+de\s+[A-Za-zÁÉÍÓÚáéíóúñÑ]+\s+de\s+20\d{2})", head, re.IGNORECASE)
-        if m:
-            dt = parse_date_any(m.group(1))
-            if dt != datetime.min: date_str = dt.strftime("%d/%m/%Y")
-    if session_year is None:
-        dt = parse_date_any(date_str)
-        if dt != datetime.min: session_year = dt.year
-    sn_int = normalize_session_number(session_number)
-    session_number = str(sn_int) if sn_int is not None else None
-    return {"session_type": session_type, "session_number": session_number, "session_year": session_year, "date": date_str}
- 
-TOPIC_RULES = [
-    ("Agua/Servicios", ["agua", "cloaca", "gas", "energía", "energia", "luz", "residuos", "basura", "saneamiento"]),
-    ("Tarifas", ["tarifa", "tasas", "impuesto", "tribut", "arancel", "reajuste", "actualización", "actualizacion"]),
-    ("Obra pública", ["obra", "pavimento", "asfalto", "vereda", "plaza", "puente", "licitación", "licitacion", "contratación", "contratacion"]),
-    ("Seguridad", ["seguridad", "tránsito", "transito", "control", "inspección", "inspeccion", "alcoholemia", "emergencia"]),
-    ("Comercio", ["comercio", "habilitación", "habilitacion", "local", "feria", "gastronomía", "gastronomia", "turismo"]),
-    ("Ambiente", ["ambiente", "bosque", "incendio", "impacto", "contaminación", "contaminacion", "reserva"]),
-    ("Vivienda/Urbanismo", ["vivienda", "urban", "lote", "zonificación", "zonificacion", "catastro", "edificación", "edificacion", "loteo"]),
-    ("Educación/Cultura", ["educación", "educacion", "escuela", "cultura", "biblioteca", "museo", "deporte"]),
-]
- 
-def classify_topics(text):
-    t = (text or "").lower()
-    return [label for label, keys in TOPIC_RULES if any(k in t for k in keys)]
- 
-IMPACT_RULES = [
-    ("💰 Bolsillo", ["tarifa", "tasa", "impuesto", "tribut", "arancel", "reajuste", "actualización", "actualizacion", "módulo", "modulo", "valor"]),
-    ("🏗 Infraestructura", ["obra", "licitación", "licitacion", "contratación", "contratacion", "pavimento", "asfalto", "vereda", "plaza", "puente"]),
-    ("🚦 Tránsito/Seguridad", ["tránsito", "transito", "circulación", "circulacion", "corte", "estacionamiento", "control", "inspección", "inspeccion", "alcoholemia", "seguridad"]),
-    ("🚰 Servicios", ["agua", "cloaca", "gas", "energía", "energia", "luz", "residuos", "basura", "saneamiento"]),
-    ("🏪 Comercio", ["habilitación", "habilitacion", "comercio", "local", "feria", "gastronomía", "gastronomia", "turismo"]),
-    ("🏘 Urbanismo", ["lote", "loteo", "urban", "zonificación", "zonificacion", "catastro", "edificación", "edificacion", "vivienda"]),
-    ("🌿 Ambiente", ["ambiente", "bosque", "incendio", "impacto", "contaminación", "contaminacion", "reserva"]),
-]
- 
-def infer_impact(text):
-    t = (text or "").lower()
-    hits = [label for label, keys in IMPACT_RULES if any(k in t for k in keys)]
-    if not hits:
-        return {"impact_tags": [], "impact_text": "🧩 Informativo: no se ve un impacto directo claro (puede ser interno/administrativo)."}
-    msg_map = {
-        "💰 Bolsillo": "Puede impactar en montos a pagar (tasas/tarifas/condiciones).",
-        "🏗 Infraestructura": "Puede implicar obras, mejoras o cortes asociados.",
-        "🚦 Tránsito/Seguridad": "Puede cambiar circulación, controles o normas.",
-        "🚰 Servicios": "Puede afectar servicios básicos (agua/cloaca/energía/residuos).",
-        "🏪 Comercio": "Puede afectar habilitaciones, comercios o turismo.",
-        "🏘 Urbanismo": "Puede afectar loteos, zonificación o desarrollo urbano.",
-        "🌿 Ambiente": "Puede afectar regulaciones ambientales o áreas naturales.",
-    }
-    top = hits[:2]
-    text_out = " ".join([f"{h}: {msg_map.get(h, '')}".strip() for h in top]).strip()
-    return {"impact_tags": hits[:4], "impact_text": text_out}
- 
-BASURA_PATTERNS = [
-    re.compile(r"^\d{5,6}[-/]\d{1,6}/\d{4}\s+\d{2}/\d{2}/\d{4}\s+Miembro\s+Informante:", re.IGNORECASE),
-    re.compile(r"^EE-\d{4}-\d+\S*\s+\d{2}/\d{2}/\d{4}\s+Miembro\s+Informante:", re.IGNORECASE),
-    re.compile(r"^Miembro\s+Informante:", re.IGNORECASE),
-]
- 
-def is_basura(s):
-    s = (s or "").strip()
-    for p in BASURA_PATTERNS:
-        if p.search(s):
-            return True
-    return False
- 
-def clean_que_dice(s):
-    s = normalize_space(s)
-    s = re.sub(r"^Dictamen\s+s/\s*", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"^Tema:\s*Dictamen\s+s/\s*", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"^Tema:\s*", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"^\d+/\d{4}\s*[-—–]\s*", "", s).strip()
-    s = re.sub(r"\s*\.-\s*De\s+\w+\s*$", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"\s*\.-\s*$", "", s).strip()
-    return s
- 
-def build_que_dice(raw):
-    s = normalize_space(raw)
-    if not s: return ""
-    if is_basura(s): return ""
-    s = clean_que_dice(s)
-    if not s: return ""
-    action = ""
-    t = s.lower()
-    if "declaración de interés" in t or "declaracion de interes" in t:
-        action = "Declaración de Interés"
-    elif "dictamen" in t:
-        action = "Dictamen"
-        s = re.sub(r"^Dictamen\s+s/\s*", "", s, flags=re.IGNORECASE).strip()
-    elif "decreto" in t:
-        action = "Decreto"
-    elif "nota" in t:
-        action = "Nota"
-    elif "habilitación" in t or "habilitacion" in t or "licencia comercial" in t:
-        action = "Habilitación"
-    elif "convenio" in t:
-        action = "Convenio"
-    elif "obra" in t or "licitación" in t or "licitacion" in t:
-        action = "Obra pública"
-    elif "regularización" in t or "regularizacion" in t:
-        action = "Regularización"
-    elif "autorización" in t or "autorizacion" in t:
-        action = "Autorización"
-    main = s if len(s) <= 260 else s[:260].rsplit(" ", 1)[0] + "…"
-    if action:
-        return f"{action}: {main}".strip()
-    return main.strip()
- 
-MI_PAT = re.compile(
-    r"^(\d{1,2})\.\s+((?:\d{5,6}[-/]\d{1,6}/\d{4}|EE-\d{4}-\d+\S*))\s+\d{2}/\d{2}/\d{4}\s+Miembro\s+Informante:",
-    re.IGNORECASE
-)
-TEMA_LINE_PAT = re.compile(r"^\d+/\d{4}\s*---\s*Tema:\s*(.+)$", re.IGNORECASE)
- 
-def extract_items(text):
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    items = []
-    exp_tema_pat = re.compile(r"^(\d{1,6}(?:[-]\d{1,6})?/\d{4})\s*[—–-]\s*Tema:\s*(.*)$", re.IGNORECASE)
-    exp_pat = re.compile(r"^(\d{1,6}(?:[-]\d{1,6})?/\d{4})\s*[—–-]\s*(.*)$", re.IGNORECASE)
-    num_pat = re.compile(r"^(\d{1,2})[\.\)]\s+(.*)$")
- 
-    def is_new_item(line):
-        if MI_PAT.match(line): return None
-        for typ, p in [("exp_tema", exp_tema_pat), ("exp", exp_pat), ("num", num_pat)]:
-            m = p.match(line)
-            if m: return (typ, m)
-        return None
- 
-    i = 0
-    while i < len(lines):
-        mi_match = MI_PAT.match(lines[i])
-        if mi_match:
-            exp_ref = mi_match.group(2).strip()
-            tema_text = ""
-            j = i + 1
-            while j < len(lines) and j < i + 5:
-                tm = TEMA_LINE_PAT.match(lines[j])
-                if tm:
-                    tema_text = tm.group(1).strip()
-                    j += 1
-                    while j < len(lines):
-                        if MI_PAT.match(lines[j]): break
-                        if TEMA_LINE_PAT.match(lines[j]): break
-                        if is_new_item(lines[j]): break
-                        tema_text += " " + lines[j]
-                        j += 1
-                    break
-                j += 1
-            if tema_text:
-                full = normalize_space(tema_text)
-                full = remove_boilerplate_global(full)
-                if full:
-                    qd = build_que_dice(full)
-                    impact = infer_impact(full)
-                    items.append({"key": exp_ref, "title": full[:2000], "que_dice": qd,
-                                  "impact_text": impact["impact_text"], "impact_tags": impact["impact_tags"],
-                                  "decreto": None, "expediente": exp_ref, "topics": classify_topics(full)})
-            i = j
-            continue
- 
-        hit = is_new_item(lines[i])
-        if not hit:
-            i += 1
-            continue
-        typ, m = hit
-        key = (m.group(1) or "").strip()
-        first = (m.group(2) or "").strip()
-        if is_basura(first):
-            i += 1
-            continue
-        parts = [first] if first else []
-        j = i + 1
-        while j < len(lines):
-            if MI_PAT.match(lines[j]): break
-            if is_new_item(lines[j]): break
-            parts.append(lines[j])
-            j += 1
-        full = normalize_space(" ".join(parts))
-        full = remove_boilerplate_global(full)
-        if not full:
-            i = j
-            continue
-        if is_basura(full):
-            i = j
-            continue
-        dec_inside = None
-        mdec = re.search(r"(?:Decreto)\s*(?:N[°º]\s*)?([A-Z0-9\-\./]+)", full, re.IGNORECASE)
-        if mdec: dec_inside = mdec.group(1)
-        exp_inside = None
-        mexp = re.search(r"(?:Expediente)\s*(?:N[°º]\s*)?([A-Z0-9\-\./]+)", full, re.IGNORECASE)
-        if mexp: exp_inside = mexp.group(1)
-        qd = build_que_dice(full)
-        impact = infer_impact(full)
-        items.append({"key": key if key else None, "title": full[:2000], "que_dice": qd,
-                       "impact_text": impact["impact_text"], "impact_tags": impact["impact_tags"],
-                       "decreto": dec_inside, "expediente": exp_inside or (key if typ in ("exp", "exp_tema") else None),
-                       "topics": classify_topics(full)})
-        i = j
- 
-    for idx, it in enumerate(items, start=1):
-        if not it.get("key"): it["key"] = str(idx)
-    return items[:800]
- 
-def build_summary_citizen(meta, topics, items):
-    parts = []
-    head = []
-    if meta.get("date"): head.append(f"**Fecha:** {meta['date']}")
-    if meta.get("session_type") or meta.get("session_number") or meta.get("session_year"):
-        head.append(f"**Documento:** {(meta.get('session_type') or 'ORDEN DEL DIA')} N° {(meta.get('session_number') or 's/n')} (Año {(meta.get('session_year') or 's/año')})")
-    if head: parts.append(" · ".join(head))
-    if topics: parts.append(f"**Temas:** {', '.join(topics)}")
-    parts.append("")
-    if items:
-        parts.append(f"**Ítems detectados:** {len(items)}")
-        parts.append("")
-        parts.append("**Puntos (claro y directo):**")
-        for it in items[:10]:
-            qd = (it.get("que_dice") or "").strip()
-            imp = (it.get("impact_text") or "").strip()
-            if qd:
-                parts.append(f"- **{it.get('key')}**: {qd}")
-                if imp: parts.append(f"  - _Impacto_: {imp}")
-    else:
-        parts.append("No se detectaron ítems claros (PDF escaneado o texto muy roto).")
-    return "\n".join(parts)
- 
-def process_pdf(pdf_bytes, filename):
-    box = extract_box_header_info(pdf_bytes)
-    raw_text = extract_text_from_pdf_bytes(pdf_bytes)
-    raw_text = remove_boilerplate_lines(raw_text)
-    raw_text = remove_boilerplate_global(raw_text)
-    text = normalize_space(raw_text)
-    meta = parse_metadata(text, filename=filename, box=box)
-    topics = classify_topics(text)
-    items = extract_items(text)
-    return {
-        "processor_version": PROCESSOR_VERSION,
-        "source": {"filename": filename, "processed_at": datetime.utcnow().isoformat() + "Z"},
-        "box_meta": box, **meta, "topics": topics, "items": items,
-        "entities": {"persons": [], "orgs": []},
-        "summary_citizen": build_summary_citizen(meta, topics, items),
-        "text_preview": text[:12000],
-    }
- 
  
 def is_probable_document_link(text, href):
     href_l = (href or "").lower()
@@ -531,7 +97,6 @@ def download_pdf(url):
         raise ValueError(f"No parece PDF. URL final: {final_url} | Content-Type: {content_type}")
     return r.content, final_url, content_disposition
  
- 
 def auto_heal_index(repo_id):
     """
     Verifica que cada registro del índice tenga su PDF y JSON.
@@ -564,7 +129,6 @@ def auto_heal_index(repo_id):
             log(f"✅ Índice limpio. Los PDFs huérfanos se van a re-descargar en el próximo ciclo.")
     else:
         log("✅ Índice íntegro.")
- 
  
 def main():
     must_env("HF_TOKEN")
