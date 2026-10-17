@@ -9,7 +9,7 @@ CULTURA = ["🎭 Cultura/Eventos"]
 
 
 def _parse(fixture, filename):
-    # filename = nombre que genera safe_filename_from_url en producción (el "°" pasa a "_")
+    # filename = nombre que genera safe_filename_from_url en producción ("N%C2%B0" pasa a "N_C2_B0")
     return process_pdf((TESTS / fixture).read_bytes(), filename)
 
 
@@ -23,8 +23,8 @@ class OrdenesDelDiaRealesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.so01 = _parse("orden-del-dia-01-2026.pdf", "Orden-del-Dia-de-la-S.O.-No-01-26.pdf")
-        cls.so12 = _parse("orden-del-dia-12-2026.pdf", "PDF-S.O.-N_-12-2026.pdf")
-        cls.so23 = _parse("orden-del-dia-23-2026.pdf", "PDF-S.O.-N_-23-2026.pdf")
+        cls.so12 = _parse("orden-del-dia-12-2026.pdf", "PDF-S.O.-N_C2_B0-12-2026.pdf")
+        cls.so23 = _parse("orden-del-dia-23-2026.pdf", "PDF-S.O.-N_C2_B0-23-2026.pdf")
         cls.todos = (cls.so01, cls.so12, cls.so23)
 
     def test_metadata(self):

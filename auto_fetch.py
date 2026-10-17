@@ -3,7 +3,7 @@ import re
 import time
 import argparse
 from datetime import datetime
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
  
 import requests
 from bs4 import BeautifulSoup
@@ -28,8 +28,9 @@ def must_env(name):
     return val
  
 def canonicalize_url(url):
+    # La página publica "N°" y requests devuelve "N%C2%B0": unquote para que sean la misma URL.
     parsed = urlparse((url or "").strip())
-    parsed = parsed._replace(fragment="")
+    parsed = parsed._replace(fragment="", path=unquote(parsed.path))
     return urlunparse(parsed)
  
 def safe_filename_from_url(url, content_disposition=None):
@@ -88,14 +89,14 @@ def fetch_pdf_links(page_url):
 def download_pdf(url):
     r = session.get(url, timeout=60, allow_redirects=True)
     r.raise_for_status()
-    final_url = canonicalize_url(r.url)
     content_type = (r.headers.get("Content-Type") or "").lower()
     content_disposition = r.headers.get("Content-Disposition")
-    dbg(f"📨 Final URL: {final_url} | Content-Type: {content_type}")
-    looks_like_pdf = ".pdf" in final_url.lower() or "application/pdf" in content_type or b"%PDF" in r.content[:1024]
+    dbg(f"📨 Final URL: {r.url} | Content-Type: {content_type}")
+    looks_like_pdf = ".pdf" in r.url.lower() or "application/pdf" in content_type or b"%PDF" in r.content[:1024]
     if not looks_like_pdf:
-        raise ValueError(f"No parece PDF. URL final: {final_url} | Content-Type: {content_type}")
-    return r.content, final_url, content_disposition
+        raise ValueError(f"No parece PDF. URL final: {r.url} | Content-Type: {content_type}")
+    # r.url tal cual (codificada): de ahí sale el nombre de archivo y por lo tanto el doc_id de lo ya guardado.
+    return r.content, r.url, content_disposition
  
 def auto_heal_index(repo_id):
     """
@@ -152,90 +153,61 @@ def main():
     auto_heal_index(DATASET_REPO_ID)
  
     index = load_index(DATASET_REPO_ID)
-    known_source_urls = {canonicalize_url((r.get("source_url") or "").strip()) for r in index if (r.get("source_url") or "").strip()}
     known_doc_ids = {r.get("doc_id") for r in index if r.get("doc_id")}
- 
+
     log(f"📚 Documentos ya indexados: {len(index)}")
     for r in index[:20]:
         dbg(f"   - {r.get('doc_id')} | {r.get('original_filename')} | {r.get('source_url')}")
- 
+
     pdf_links = fetch_pdf_links(page_url)
-    new_links = [u for u in pdf_links if canonicalize_url(u) not in known_source_urls]
-    log(f"🆕 Nuevos detectados por URL: {len(new_links)}")
-    for u in new_links: log(f"   - {u}")
- 
+
     uploaded_count = 0
     reprocessed_count = 0
     skipped_count = 0
     errors = []
- 
+
     for url in pdf_links:
         try:
-            canon_url = canonicalize_url(url)
-            is_new = canon_url not in known_source_urls
- 
             log(f"⬇️ Descargando: {url}")
-            data, final_url, content_disposition = download_pdf(url)
+            data, raw_url, content_disposition = download_pdf(url)
+            source_url = canonicalize_url(raw_url)
             digest = sha256_bytes(data)
-            fname = safe_filename_from_url(final_url, content_disposition)
+            fname = safe_filename_from_url(raw_url, content_disposition)
             doc_id = make_doc_id(data, fname)
- 
             log(f"✅ Descargado OK. Bytes: {len(data)} | doc_id: {doc_id}")
- 
-            if not is_new and doc_id in known_doc_ids:
+
+            # Se decide por contenido (doc_id) y versión, no por URL: la misma URL puede traer un PDF corregido
+            # y la misma URL puede venir escrita distinto ("N°" / "N%C2%B0").
+            if doc_id in known_doc_ids:
                 existing_json = load_processed_json(DATASET_REPO_ID, doc_id)
-                if existing_json and existing_json.get("processor_version", 0) < PROCESSOR_VERSION:
-                    log(f"♻️ Reprocesando versión vieja ({existing_json.get('processor_version')}) → {PROCESSOR_VERSION}")
-                    processed = process_pdf(data, fname)
-                    upload_pdf_and_json(repo_id=DATASET_REPO_ID, doc_id=doc_id, pdf_bytes=data,
-                                        processed_json=processed, original_filename=fname,
-                                        source_url=final_url, sha256_digest=digest)
-                    reprocessed_count += 1
-                    log("✅ Reprocesado y actualizado.")
-                else:
+                old_version = (existing_json or {}).get("processor_version") or 0
+                if existing_json and old_version >= PROCESSOR_VERSION:
                     log(f"⚠️ Saltado: versión actual, doc_id {doc_id}")
                     skipped_count += 1
-                continue
- 
-            if not is_new:
-                log(f"⚠️ Saltado: source_url ya existente {final_url}")
-                skipped_count += 1
-                continue
- 
-            with_index_same_url = any(canonicalize_url((r.get("source_url") or "").strip()) == final_url for r in index)
-            if with_index_same_url:
-                log(f"⚠️ Saltado: source_url ya existente {final_url}")
-                skipped_count += 1
-                continue
- 
-            log("🧠 Procesando PDF...")
+                    continue
+                log(f"♻️ Reprocesando versión {old_version or 'sin JSON'} → {PROCESSOR_VERSION}")
+            else:
+                log("🧠 Procesando PDF nuevo...")
+
             processed = process_pdf(data, fname)
- 
-            log("📦 Subiendo raw + processed + index...")
             upload_pdf_and_json(repo_id=DATASET_REPO_ID, doc_id=doc_id, pdf_bytes=data,
                                 processed_json=processed, original_filename=fname,
-                                source_url=final_url, sha256_digest=digest)
- 
-            index.insert(0, {
-                "doc_id": doc_id, "original_filename": fname,
-                "pdf_path": f"raw/{doc_id}.pdf", "json_path": f"processed/{doc_id}.json",
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "session_type": processed.get("session_type"), "session_number": processed.get("session_number"),
-                "session_year": processed.get("session_year"), "date": processed.get("date"),
-                "topics": processed.get("topics", []), "source_url": final_url, "sha256": digest,
-            })
-            known_doc_ids.add(doc_id)
-            known_source_urls.add(final_url)
-            uploaded_count += 1
-            log("✅ Documento subido y indexado correctamente.")
- 
+                                source_url=source_url, sha256_digest=digest)
+            if doc_id in known_doc_ids:
+                reprocessed_count += 1
+                log("✅ Reprocesado y actualizado.")
+            else:
+                known_doc_ids.add(doc_id)
+                uploaded_count += 1
+                log("✅ Documento subido y indexado correctamente.")
+
             if args.sleep > 0: time.sleep(args.sleep)
- 
+
         except Exception as e:
             err = f"❌ Error con {url}: {e}"
             log(err)
             errors.append(err)
- 
+
     log(f"🏁 Fin. Nuevos: {uploaded_count} | Reprocesados: {reprocessed_count} | Saltados: {skipped_count} | Errores: {len(errors)}")
     if errors:
         log("⚠️ Errores:")
