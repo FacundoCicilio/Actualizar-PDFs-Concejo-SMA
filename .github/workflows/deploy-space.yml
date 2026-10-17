@@ -1,0 +1,38 @@
+name: Deploy Space
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+concurrency: deploy-space
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+      - name: Run tests
+        run: |
+          python -m unittest -v test_store
+      - name: Upload to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # upload_folder agrega un commit sobre el historial del Space (sin force push) y borra lo que ya no está en GitHub.
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+          HfApi(token=os.environ["HF_TOKEN"]).upload_folder(
+              repo_id="Facucici/actas-sma",
+              repo_type="space",
+              folder_path=".",
+              ignore_patterns=[".github/*", "*__pycache__*", "*.pyc"],
+              delete_patterns=["*"],
+              commit_message=f"Deploy {os.environ['GITHUB_SHA'][:7]} desde GitHub",
+          )
+          EOF
