@@ -26,12 +26,14 @@ jobs:
       - name: Install deps
         run: |
           pip install -r requirements.txt
-      # Abre un Issue con la vista previa; no publica ni toca el estado del período de prueba.
+      # Abre un Issue con la vista previa y la verificación del token (solo consulta /me); no publica ni toca el estado.
       - name: Vista previa
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
           GITHUB_TOKEN: ${{ github.token }}
           ORDEN: ${{ inputs.orden }}
           ANIO: ${{ inputs.anio }}

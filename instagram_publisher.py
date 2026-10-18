@@ -22,6 +22,7 @@ STATE_PATH = "instagram/state.json"
 TOKEN_PATH = "instagram/token.json"  # aparte del estado: el estado puede terminar citado en un Issue, el token nunca
 MEDIA_BRANCH = "instagram-media"     # imágenes públicas para Instagram; un push acá no dispara el deploy del Space
 GRAPH = "https://graph.instagram.com/v25.0"
+IG_USERNAME = "concejo.sma"  # cuenta en la que se publica: la prueba verifica que el token sea de esta cuenta
 REVIEW_APPROVALS = 3
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
 REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación
@@ -412,25 +413,45 @@ def run():
     return 1 if errors else 0
 
 
+def check_token():
+    """(ok, mensaje) sobre el secret IG_ACCESS_TOKEN: solo consulta /me, no publica. El mensaje nunca incluye el token."""
+    token = ic.env_value("IG_ACCESS_TOKEN")
+    if not token:
+        return False, "Falta el secret `IG_ACCESS_TOKEN`."
+    try:
+        me = ig("GET", "me", token, fields="user_id,username")
+    except PublishError as e:
+        return False, f"El token no funciona: {e}"
+    if me.get("username") != IG_USERNAME:
+        return False, f"El token es de la cuenta @{me.get('username')}, no de @{IG_USERNAME}."
+    expected_id = ic.env_value("IG_USER_ID")
+    if expected_id and str(me.get("user_id")) != expected_id:
+        return False, f"El token es de @{IG_USERNAME}, pero el secret `IG_USER_ID` no coincide con el ID de esa cuenta."
+    return True, f"Token válido: cuenta @{IG_USERNAME}."
+
+
 def run_preview(session_number, year):
-    """Workflow "Probar Instagram": Issue con la vista previa de una orden ya procesada. No publica ni toca el estado."""
+    """Workflow "Probar Instagram": Issue con la vista previa de una orden ya procesada y la verificación del token.
+    No publica ni toca el estado."""
     matches = [r for r in load_index(DATASET_REPO_ID)
                if str(r.get("session_number")) == str(session_number) and str(r.get("session_year")) == str(year)]
     if not matches:
         raise PublishError(f"No hay una orden del día N° {session_number} de {year} en el índice.")
     rec = max(matches, key=lambda r: r.get("created_at") or "")
+    token_ok, token_msg = check_token()
+    check = ["### Verificación del token de Instagram", "", ("✅ " if token_ok else "❌ ") + token_msg, ""]
     ensure_setup()
     prep = prepare(rec["doc_id"], f"prueba/{rec['doc_id']}-{now():%Y%m%d%H%M%S}")
     if prep is None:
         doc = load_processed_json(DATASET_REPO_ID, rec["doc_id"]) or {}
-        number, url = create_issue(preview_title(doc, prueba=True),
-                                   "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría.",
-                                   ["instagram-prueba"])
+        body = "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría."
     else:
         doc, urls, caption = prep
-        number, url = create_issue(preview_title(doc, prueba=True), preview_body(urls, caption), ["instagram-prueba"])
+        body = preview_body(urls, caption)
+    number, url = create_issue(preview_title(doc, prueba=True), "\n".join(check) + "\n" + body, ["instagram-prueba"])
     print(f"Vista previa de prueba: {url}")
-    return 0
+    print(("OK: " if token_ok else "ERROR: ") + token_msg)
+    return 0 if token_ok else 1  # en rojo en Actions si el token no sirve (el detalle está en el Issue)
 
 
 def main():

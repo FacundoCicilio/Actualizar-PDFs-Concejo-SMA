@@ -60,14 +60,14 @@ class FakeGitHub:
 class FakeIG:
     def __init__(self):
         self.calls, self.fail_child, self.status, self.recent = [], None, {}, []  # status: estado por contenedor
-        self.valid_tokens = {TOKEN}
+        self.valid_tokens, self.username = {TOKEN}, "concejo.sma"
 
     def __call__(self, method, path, token, **p):
         self.calls.append((method, path, p))
         if token not in self.valid_tokens:
             raise pub.IGError("Instagram: token inválido", 190)
         if path == "me":
-            return {"user_id": "17841"}
+            return {"user_id": "17841", "username": self.username}
         if method == "POST" and path.endswith("/media"):
             if p.get("is_carousel_item"):
                 n = sum(1 for c in self.calls if c[2].get("is_carousel_item"))
@@ -312,16 +312,48 @@ class PublisherTest(unittest.TestCase):
         self.assertNotIn(TOKEN, self.gh.all_text())
 
     # --- workflow de prueba
-    def test_prueba_abre_issue_sin_tocar_el_estado(self):
+    def preview(self):
         self.index.append(rec("od23", 23))
         self.docs["od23"] = GENERAL
-        self.assertEqual(pub.run_preview(23, 2026), 0)
+        code = pub.run_preview(23, 2026)
         [issue] = self.gh.by_label("instagram-prueba")
+        self.assertNotIn(TOKEN, issue["body"])
+        self.assertEqual([(m, path) for m, path, _ in self.ig.calls], [("GET", "me")] * len(self.ig.calls))  # nunca publica
+        self.assertNotIn(pub.STATE_PATH, self.hf)
+        return code, issue
+
+    def test_prueba_abre_issue_con_token_valido(self):
+        code, issue = self.preview()
+        self.assertEqual(code, 0)
         self.assertIn("PRUEBA", issue["title"])
         self.assertIn("no se publica", issue["body"])
-        self.assertNotIn(pub.STATE_PATH, self.hf)
+        self.assertIn("✅ Token válido: cuenta @concejo.sma.", issue["body"])
+
+    def test_prueba_con_token_de_otra_cuenta(self):
+        self.ig.username = "otra.cuenta"
+        code, issue = self.preview()
+        self.assertEqual(code, 1)
+        self.assertIn("❌ El token es de la cuenta @otra.cuenta, no de @concejo.sma.", issue["body"])
+        self.assertIn("![Placa 1]", issue["body"])  # la vista previa sale igual
+
+    def test_prueba_con_token_invalido(self):
+        self.ig.valid_tokens = set()
+        code, issue = self.preview()
+        self.assertEqual(code, 1)
+        self.assertIn("❌ El token no funciona: Instagram: token inválido", issue["body"])
+
+    def test_prueba_sin_secret(self):
+        del os.environ["IG_ACCESS_TOKEN"]
+        code, issue = self.preview()
+        self.assertEqual(code, 1)
+        self.assertIn("❌ Falta el secret `IG_ACCESS_TOKEN`.", issue["body"])
         self.assertEqual(self.ig.calls, [])
 
+    def test_prueba_con_ig_user_id_distinto(self):
+        os.environ["IG_USER_ID"] = "999"
+        code, issue = self.preview()
+        self.assertEqual(code, 1)
+        self.assertIn("IG_USER_ID", issue["body"])
 
 if __name__ == "__main__":
     unittest.main()
