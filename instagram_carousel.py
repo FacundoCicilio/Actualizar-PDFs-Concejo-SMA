@@ -149,47 +149,43 @@ DOTENV = Path(__file__).with_name(".env")  # está en .gitignore
 # Es un orden del día: nada está votado. Si el modelo igual lo da por hecho, la línea se descarta.
 DECIDED_PAT = re.compile(r"\bse\s+(?:aprueba|aprob[oó]|modifica|modific[oó])\b", re.I)
 _client = None
-_warned_dotenv = False
+_warned_dotenv = set()
 
 
-def api_key():
-    """ANTHROPIC_API_KEY del entorno o, si no está, del .env del repo. Solo lee esa clave; vacía cuenta como ausente."""
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return os.environ["ANTHROPIC_API_KEY"]
+def env_value(name):
+    """Variable del entorno o, si no está, del .env del repo. Solo lee esa clave; vacía cuenta como ausente."""
+    if os.getenv(name):
+        return os.environ[name]
     try:
         lines = DOTENV.read_text(encoding="utf-8-sig").splitlines()
     except OSError:  # no hay .env
         return None
     for ln in lines:
-        name, sep, value = ln.strip().partition("=")
-        if sep and name.strip().removeprefix("export ").strip() == "ANTHROPIC_API_KEY":
+        key, sep, value = ln.strip().partition("=")
+        if sep and key.strip().removeprefix("export ").strip() == name:
             return value.strip().strip("\"'") or None
-    global _warned_dotenv
-    if not _warned_dotenv:  # una vez por ejecución; nunca se imprime nada del archivo
-        _warned_dotenv = True
-        print("Aviso: el archivo .env existe pero no tiene la linea ANTHROPIC_API_KEY=... ; las placas salen sin 'En criollo'")
+    if name not in _warned_dotenv:  # una vez por variable y ejecución; nunca se imprime nada del archivo
+        _warned_dotenv.add(name)
+        print(f"Aviso: el archivo .env existe pero no tiene la linea {name}=...")
     return None
 
 
-def criollo(official_text):
-    """Línea en lenguaje simple, o None si no hay API key o la API falla: la placa sale igual, sin esa línea."""
+def api_key():
+    return env_value("ANTHROPIC_API_KEY")
+
+
+def _ask_claude(official_text):
+    """Pide la línea a Claude. Lanza anthropic.APIError si la API falla; None si la respuesta no sirve."""
     global _client
-    key = api_key()
-    if not key:
-        return None
-    try:
-        if _client is None:
-            _client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=2)
-        resp = _client.messages.create(
-            model=CRIOLLO_MODEL,
-            max_tokens=1024,
-            output_config={"effort": "low"},
-            system=CRIOLLO_SYSTEM,
-            messages=[{"role": "user", "content": official_text}],  # ya anonimizado: los nombres no salen del sistema
-        )
-    except anthropic.APIError as e:  # cualquier falla (red, 4xx, 5xx) se resuelve igual: placa sin la línea
-        print(f"Aviso: linea 'En criollo' no disponible ({type(e).__name__})")  # ASCII: un emoji rompe la consola de Windows
-        return None
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=api_key(), timeout=30.0, max_retries=2)
+    resp = _client.messages.create(
+        model=CRIOLLO_MODEL,
+        max_tokens=1024,
+        output_config={"effort": "low"},
+        system=CRIOLLO_SYSTEM,
+        messages=[{"role": "user", "content": official_text}],  # ya anonimizado: los nombres no salen del sistema
+    )
     if resp.stop_reason != "end_turn":  # refusal / max_tokens: mejor sin línea que con una cortada
         return None
     out = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -199,6 +195,30 @@ def criollo(official_text):
         return None
     out = anonymize(out)
     return shorten(out, 180) if out else None
+
+
+def criollo(official_text):
+    """Línea en lenguaje simple, o None si no hay API key o la API falla: la placa sale igual, sin esa línea."""
+    if not api_key():
+        return None
+    try:
+        return _ask_claude(official_text)
+    except anthropic.APIError as e:
+        print(f"Aviso: linea 'En criollo' no disponible ({type(e).__name__})")  # ASCII: un emoji rompe la consola de Windows
+        return None
+
+
+def criollo_lines(items):
+    """Líneas "En criollo" de todos los ítems o de ninguno (no se mezclan placas con y sin línea si la API falla).
+    Devuelve (líneas, error): error es un texto para avisar, sin datos sensibles, o None."""
+    if not items:
+        return [], None
+    if not api_key():
+        return [None] * len(items), "Falta ANTHROPIC_API_KEY: las placas salen sin 'En criollo'."
+    try:
+        return [_ask_claude(official_text(it)) for it in items], None
+    except anthropic.APIError as e:
+        return [None] * len(items), f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
 
 
 def impact_score(item):
@@ -336,7 +356,7 @@ def cover(doc, n_selected):
     return img
 
 
-def item_slide(doc, item, pos, n_selected, page, total):
+def item_slide(doc, item, simple, pos, n_selected, page, total):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
     brand_bar(d, ACCENT, session_title(doc), MUTED)
@@ -344,7 +364,6 @@ def item_slide(doc, item, pos, n_selected, page, total):
 
     action = split_action(item.get("que_dice"))[0]
     official = official_text(item)
-    simple = criollo(official)
     kicker = f"{action.upper()} · PUNTO {pos} DE {n_selected}" if action else f"PUNTO {pos} DE {n_selected}"
     tags = (item.get("impact_tags") or [])[:2]
     impact_msg = IMPACT_MESSAGES.get(tags[0], "") if tags else "Informativo: sin impacto directo claro (puede ser interno o administrativo)."
@@ -410,19 +429,25 @@ def closing():
     return img
 
 
-def render_carousel(doc, out_dir, prefix="slide"):
-    """Escribe las placas PNG y caption.txt en out_dir. Devuelve la lista de rutas de las imágenes."""
+def render_carousel(doc, out_dir, prefix="slide", simple_lines=None, ext="png"):
+    """Escribe las placas (png o jpg) y caption.txt en out_dir. Devuelve la lista de rutas de las imágenes.
+    simple_lines: líneas "En criollo" ya generadas (una por ítem de select_items); si es None, se piden a Claude."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     items = select_items(doc)
+    if simple_lines is None:
+        simple_lines, error = criollo_lines(items)
+        if error:
+            print(f"Aviso: {error}")
     slides = [cover(doc, len(items))]
     total = len(items) + 2
-    slides += [item_slide(doc, it, i, len(items), i + 1, total) for i, it in enumerate(items, start=1)]
+    slides += [item_slide(doc, it, simple, i, len(items), i + 1, total)
+               for i, (it, simple) in enumerate(zip(items, simple_lines), start=1)]
     slides.append(closing())
     paths = []
     for i, img in enumerate(slides, start=1):
-        p = out / f"{prefix}-{i:02d}.png"
-        img.save(p, optimize=True)
+        p = out / f"{prefix}-{i:02d}.{ext}"
+        img.save(p, quality=90, optimize=True)  # quality solo aplica a JPEG (Instagram solo acepta JPEG)
         paths.append(p)
     (out / "caption.txt").write_text(build_caption(doc, items), encoding="utf-8")
     return paths

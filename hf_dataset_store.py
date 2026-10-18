@@ -136,6 +136,16 @@ def load_index(repo_id):
     if isinstance(data, dict): return rebuild_index_from_processed(repo_id)
     return []
 
+def load_json(repo_id, path):
+    """JSON del dataset, o None si el archivo no existe. Otros errores se propagan (ver download_text_file)."""
+    raw = download_text_file(repo_id, path)
+    return json.loads(raw) if raw else None
+
+def save_json(repo_id, path, data, message):
+    content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    if not _upload_with_retry(api(), io.BytesIO(content), path, repo_id, "dataset", message):
+        raise RuntimeError(f"No se pudo guardar {path} en el dataset.")
+
 def save_index(repo_id, index, message="Update index"):
     content = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
     hf = api()

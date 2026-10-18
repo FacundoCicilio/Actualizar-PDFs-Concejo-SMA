@@ -1,14 +1,18 @@
 name: Auto Fetch Actas
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "0 10 * * *"  # instagram_publisher.py usa esta hora (CRON_HOUR_UTC) para anunciar cuándo publica
   workflow_dispatch: {}
+concurrency:
+  group: instagram  # el estado de Instagram es leer-modificar-escribir: nunca dos corridas a la vez
+  cancel-in-progress: false
 jobs:
   fetch:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      actions: write  # para el keepalive
+      contents: write  # rama instagram-media (imágenes públicas para Instagram)
+      issues: write    # vistas previas y avisos de error
+      actions: write   # para el keepalive
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -19,6 +23,7 @@ jobs:
         run: |
           pip install -r requirements.txt
       - name: Run tests
+        id: tests
         run: |
           python -m unittest discover -v
       - name: Run auto_fetch
@@ -28,6 +33,18 @@ jobs:
           SOURCE_URL: "https://prensacd.cdsma.gob.ar/ordenes-del-dia-2026/"
         run: |
           python auto_fetch.py
+      # Corre aunque auto_fetch falle (puede haber vistas previas pendientes), pero no si fallaron los tests.
+      - name: Instagram
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python instagram_publisher.py
       # GitHub desactiva los crons tras 60 días sin actividad en el repo; re-habilitarlo por API reinicia ese contador sin commits.
       - name: Keepalive
         if: always()

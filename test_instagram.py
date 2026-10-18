@@ -79,7 +79,7 @@ class ApiKeyTest(unittest.TestCase):
         self.assertIsNone(self._key_con_dotenv(None))
 
     def test_dotenv_sin_la_linea_avisa_sin_mostrar_el_contenido(self):
-        with mock.patch.object(ic, "_warned_dotenv", False), mock.patch("builtins.print") as fake_print:
+        with mock.patch.object(ic, "_warned_dotenv", set()), mock.patch("builtins.print") as fake_print:
             self.assertIsNone(self._key_con_dotenv("sk-ant-usr-SECRETO-pegado-sin-nombre\n"))
             self.assertIsNone(self._key_con_dotenv("sk-ant-usr-SECRETO-pegado-sin-nombre\n"))
         self.assertEqual(fake_print.call_count, 1)  # una sola vez por ejecución
@@ -132,6 +132,22 @@ class CriolloTest(unittest.TestCase):
                 mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=mock.Mock(return_value=resp)))):
             self.assertEqual(ic.criollo("Modificación de la tarifa de taxis"), texto)
 
+    def test_lineas_todas_o_ninguna_si_la_api_falla(self):
+        items = ic.select_items(DOC)
+        respuestas = [SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="El Concejo trata algo.")]),
+                      anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))]
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}),                 mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=mock.Mock(side_effect=respuestas)))):
+            lineas, error = ic.criollo_lines(items)
+        self.assertEqual(lineas, [None, None, None])  # la primera había salido bien, pero no se mezclan
+        self.assertIn("APIConnectionError", error)
+        self.assertNotIn("test", error)  # nunca la key
+
+    def test_lineas_sin_key_avisa(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            lineas, error = ic.criollo_lines(ic.select_items(DOC))
+        self.assertEqual(lineas, [None, None, None])
+        self.assertIn("ANTHROPIC_API_KEY", error)
+
     def test_respuesta_incompleta_no_se_usa(self):
         resp = SimpleNamespace(stop_reason="max_tokens", content=[SimpleNamespace(type="text", text="Le cambian el")])
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}), \
@@ -152,9 +168,9 @@ class SalidaTest(unittest.TestCase):
         self.assertLessEqual(len(cap), 2200)  # límite de Instagram
 
     def test_placas_1080x1350_con_y_sin_criollo(self):
-        for simple in (None, "El Concejo revisa cuánto cuesta viajar en taxi."):
-            with tempfile.TemporaryDirectory() as out, mock.patch.object(ic, "criollo", return_value=simple):
-                paths = ic.render_carousel(DOC, out)
+        for simple in (None, "El Concejo trata un cambio en la tarifa de taxis."):
+            with tempfile.TemporaryDirectory() as out:
+                paths = ic.render_carousel(DOC, out, simple_lines=[simple] * 3, ext="jpg")
                 self.assertEqual(len(paths), 5)  # portada + 3 ítems relevantes + cierre
                 for p in paths:
                     with Image.open(p) as img:
