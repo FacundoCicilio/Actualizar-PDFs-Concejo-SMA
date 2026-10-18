@@ -305,6 +305,18 @@ IMPACT_RULES = [
 ]
 
 
+IMPACT_MESSAGES = {
+    "💰 Bolsillo": "Puede impactar en montos a pagar (tasas/tarifas/condiciones).",
+    "🏗 Infraestructura": "Puede implicar obras, mejoras o cortes asociados.",
+    "🚦 Tránsito/Seguridad": "Puede cambiar circulación, controles o normas.",
+    "🚰 Servicios": "Puede afectar servicios básicos (agua/cloaca/energía/residuos).",
+    "🏪 Comercio": "Puede afectar habilitaciones o comercios.",
+    "🏘 Urbanismo": "Puede afectar loteos, zonificación o desarrollo urbano.",
+    "🌿 Ambiente": "Puede afectar regulaciones ambientales o áreas naturales.",
+    "🎭 Cultura/Eventos": "Declaración de interés o apoyo a evento/actividad cultural.",
+}
+
+
 DECLARACION_INTERES_PAT = re.compile(r"\bdeclar\w*\s+de\s+interes\b")  # \w* tolera "Declararación"
 
 
@@ -318,18 +330,8 @@ def infer_impact(text):
         hits = [label for label, keys in IMPACT_RULES if _matches(t, keys)]
     if not hits:
         return {"impact_tags": [], "impact_text": "🧩 Informativo: no se ve un impacto directo claro (puede ser interno/administrativo)."}
-    msg_map = {
-        "💰 Bolsillo": "Puede impactar en montos a pagar (tasas/tarifas/condiciones).",
-        "🏗 Infraestructura": "Puede implicar obras, mejoras o cortes asociados.",
-        "🚦 Tránsito/Seguridad": "Puede cambiar circulación, controles o normas.",
-        "🚰 Servicios": "Puede afectar servicios básicos (agua/cloaca/energía/residuos).",
-        "🏪 Comercio": "Puede afectar habilitaciones o comercios.",
-        "🏘 Urbanismo": "Puede afectar loteos, zonificación o desarrollo urbano.",
-        "🌿 Ambiente": "Puede afectar regulaciones ambientales o áreas naturales.",
-        "🎭 Cultura/Eventos": "Declaración de interés o apoyo a evento/actividad cultural.",
-    }
     top = hits[:2]
-    text_out = " ".join([f"{h}: {msg_map.get(h, '')}".strip() for h in top]).strip()
+    text_out = " ".join([f"{h}: {IMPACT_MESSAGES.get(h, '')}".strip() for h in top]).strip()
     return {"impact_tags": hits[:4], "impact_text": text_out}
 
 
