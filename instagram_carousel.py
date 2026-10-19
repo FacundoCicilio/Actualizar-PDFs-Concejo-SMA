@@ -42,24 +42,16 @@ TAG_COLOR = {
 }
 HASHTAGS = "#SanMartinDeLosAndes #SMAndes #ConcejoDeliberante #Neuquen #Patagonia #ObservatorioDeActas #TransparenciaMunicipal"
 
-FONT_FILES = {
-    False: ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "segoeui.ttf", "arial.ttf"],
-    True: ["DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "segoeuib.ttf", "arialbd.ttf"],
-}
+# Inter (licencia OFL, fonts/OFL.txt) incluida en el repo: las placas salen idénticas en Windows y en Actions.
+FONT_FILES = {False: Path(__file__).with_name("fonts") / "Inter-Regular.ttf",
+              True: Path(__file__).with_name("fonts") / "Inter-Bold.ttf"}
 _fonts = {}
 
 
 def font(size, bold=False):
     key = (size, bold)
     if key not in _fonts:
-        for name in FONT_FILES[bold]:
-            try:
-                _fonts[key] = ImageFont.truetype(name, size)
-                break
-            except OSError:
-                continue
-        else:
-            _fonts[key] = ImageFont.load_default(size)  # sin negrita, pero con tildes
+        _fonts[key] = ImageFont.truetype(str(FONT_FILES[bold]), size)
     return _fonts[key]
 
 
@@ -327,7 +319,17 @@ def fit_text(draw, text, width, max_height, sizes=(56, 52, 48, 44, 40, 36), bold
         lh = int(size * 1.32)
         if len(lines) * lh <= max_height:
             return fnt, lines, lh
-    return fnt, lines[: max_height // lh], lh  # último recurso: se corta (los textos ya vienen limitados a ~260 caracteres)
+    return fnt, clip(draw, lines, max(1, max_height // lh), fnt, width), lh  # último recurso: se corta con "…"
+
+
+def clip(draw, lines, n, fnt, width):
+    """Las primeras n líneas; si sobran, la última termina en "…" sin pasarse del ancho."""
+    if len(lines) <= n:
+        return lines
+    words = lines[n - 1].split()
+    while len(words) > 1 and draw.textlength(" ".join(words) + "…", font=fnt) > width:
+        words.pop()
+    return lines[:n - 1] + [" ".join(words).rstrip(",;:.") + "…"]
 
 
 def draw_lines(draw, xy, lines, fnt, lh, fill):
@@ -391,19 +393,14 @@ def item_slide(doc, item, simple, pos, n_selected, page, total):
     tags = (item.get("impact_tags") or [])[:2]
     impact_msg = IMPACT_MESSAGES.get(tags[0], "") if tags else "Informativo: sin impacto directo claro (puede ser interno o administrativo)."
 
-    d = MEASURE
-    width = W - 2 * M
-    blocks = [("text", [kicker], font(32, True), 44, ACCENT, 36)]  # (tipo, líneas, fuente, alto de línea, color, espacio después)
+    blocks = [text_block(kicker, (32,), ACCENT, 36, bold=True)]
     if simple:
-        blocks.append(("text", ["En criollo:"], font(36, True), 48, ACCENT, 8))
+        blocks.append(text_block("En criollo:", (36,), ACCENT, 8, bold=True))
         # textos cortos -> letra más grande: llena la placa en vez de dejar aire
-        f, ls, lh = fit_text(d, simple, width, 440, sizes=(72, 66, 60, 56, 52, 48, 44), bold=True)
-        blocks.append(("text", ls, f, lh, INK, 44))
-        f, ls, lh = fit_text(d, official, width, 300, sizes=(40, 36, 34, 32, 30))
-        blocks.append(("text", ls, f, lh, MUTED, 44))
+        blocks.append(text_block(simple, (72, 66, 60, 56, 52, 48, 44), INK, 44, 440, bold=True))
+        blocks.append(text_block(official, (40, 36, 34, 32, 30), MUTED, 44, 300))
     else:
-        f, ls, lh = fit_text(d, official, width, 660, sizes=(84, 76, 68, 60, 56, 52, 48, 44, 40, 36))
-        blocks.append(("text", ls, f, lh, INK, 48))
+        blocks.append(text_block(official, (84, 76, 68, 60, 56, 52, 48, 44, 40, 36), INK, 48, 660))
     blocks += impact_blocks(tags, impact_msg)
     ref = f"Ref. {item.get('expediente') or item.get('key')}" if item.get("expediente") or item.get("key") else ""
     return content_slide(session_title(doc), blocks, ref, f"{page}/{total}")
@@ -412,25 +409,66 @@ def item_slide(doc, item, simple, pos, n_selected, page, total):
 MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))  # solo para medir texto antes de dibujar
 
 
+def text_block(text, sizes, color, gap, max_h=None, bold=False):
+    """Bloque de texto para content_slide: el tamaño de letra se elige al armar la placa (ver layout)."""
+    return ("text", text, sizes, bold, color, gap, max_h or int(max(sizes) * 1.32))
+
+
 def impact_blocks(tags, impact_msg):
-    f, ls, lh = fit_text(MEASURE, impact_msg, W - 2 * M, 140, sizes=(38, 34, 30))
-    return [("rule", None, None, 2, LINE, 40)] + ([("chips", tags, None, 56, None, 28)] if tags else []) + [("text", ls, f, lh, MUTED, 0)]
+    return ([("rule", None, None, None, LINE, 40, 2)] + ([("chips", tags, None, None, None, 28, 56)] if tags else [])
+            + [text_block(impact_msg, (38, 34, 30), MUTED, 0, 140)])
+
+
+CONTENT_TOP, CONTENT_BOTTOM = 170, H - 140  # el pie ("Ref. …" y la página) está en H - 100
+SCALES = (1, 0.9, 0.8, 0.7, 0.6)
+
+
+def layout(blocks, avail):
+    """Bloques listos para dibujar: (tipo, líneas, fuente, alto de línea, color, espacio después). Si no entran en
+    avail, achica todas las letras; si ni así entran, recorta con "…". Nunca se pasan de avail."""
+    for scale in SCALES:
+        out = []
+        for kind, payload, sizes, bold, color, gap, max_h in blocks:
+            gap = int(gap * scale)
+            if kind == "text":
+                f, ls, lh = fit_text(MEASURE, payload, W - 2 * M, int(max_h * scale), [max(20, int(x * scale)) for x in sizes], bold)
+                out.append((kind, ls, f, lh, color, gap))
+            else:
+                out.append((kind, payload, None, max_h, color, gap))
+        if sum(block_height(b) for b in out) <= avail:
+            return out
+    clipped, room = [], avail  # último recurso
+    for kind, lines, f, lh, color, gap in out:
+        if kind == "text":
+            n = min(len(lines), room // lh)
+            if n < 1:
+                break
+            lines = clip(MEASURE, lines, n, f, W - 2 * M) if n < len(lines) else lines
+        elif lh > room:
+            break
+        clipped.append((kind, lines, f, lh, color, gap))
+        room -= block_height(clipped[-1])
+        if room <= 0:
+            break
+    return clipped
+
+
+def block_height(b):
+    kind, lines, _, lh, _, gap = b
+    return (len(lines) * lh if kind == "text" else lh) + gap
 
 
 def content_slide(header, blocks, footer_left, page_txt, accent=ACCENT):
-    """Placa clara. blocks: (tipo, líneas, fuente, alto de línea, color, espacio después), de arriba a abajo;
-    se miden primero y se centran en el alto libre (sin hueco fijo abajo)."""
+    """Placa clara. blocks (text_block, impact_blocks) de arriba a abajo; se miden primero y se centran en el alto
+    libre, sin invadir nunca el pie."""
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
     brand_bar(d, accent, header, MUTED)
     d.line((M, 130, W - M, 130), fill=LINE, width=2)
 
-    def height(b):
-        kind, lines, _, lh, _, gap = b
-        return (len(lines) * lh if kind == "text" else lh) + gap
-
-    top, bottom = 170, H - 140
-    y = top + max(0, (bottom - top - sum(height(b) for b in blocks)) // 2)
+    avail = CONTENT_BOTTOM - CONTENT_TOP
+    blocks = layout(blocks, avail)
+    y = CONTENT_TOP + max(0, (avail - sum(block_height(b) for b in blocks)) // 2)
     for kind, lines, fnt, lh, color, gap in blocks:
         if kind == "text":
             y = draw_lines(d, (M, y), lines, fnt, lh, color)
@@ -577,10 +615,9 @@ def destacado(note):
 def note_slide(sdoc, note, pos, n, page, total):
     tags = (note.get("impact_tags") or [])[:2]
     impact_msg = IMPACT_MESSAGES.get(tags[0], "") if tags else "Aprobado por el Concejo Deliberante."
-    f, ls, lh = fit_text(MEASURE, note["line"], W - 2 * M, 560, sizes=(72, 66, 60, 56, 52, 48, 44), bold=True)
-    blocks = [("text", [f"APROBADO · {pos} DE {n}"], font(32, True), 44, APROBADO[0], 36),
-              ("text", ["En criollo:"], font(36, True), 48, APROBADO[0], 8),
-              ("text", ls, f, lh, INK, 44)] + impact_blocks(tags, impact_msg)
+    blocks = [text_block(f"APROBADO · {pos} DE {n}", (32,), APROBADO[0], 36, bold=True),
+              text_block("En criollo:", (36,), APROBADO[0], 8, bold=True),
+              text_block(note["line"], (72, 66, 60, 56, 52, 48, 44), INK, 44, 560, bold=True)] + impact_blocks(tags, impact_msg)
     return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", APROBADO[0])
 
 
@@ -610,15 +647,16 @@ def destacado_cover(sdoc, fields, tags):
     brand_bar(d, "white")
     d.line((M, 130, W - M, 130), fill=soft, width=2)
     d.text((M, 300), "DESTACADO", font=font(40, True), fill=soft)
-    f, ls, lh = fit_text(d, fields["titular"], W - 2 * M, 520, sizes=(96, 88, 80, 72, 64, 56), bold=True)
-    y = draw_lines(d, (M, 390), ls, f, lh, "white") + 50
+    # de arriba a abajo, cada caja con alto máximo: lo último (las etiquetas) termina antes de H - 230
+    f, ls, lh = fit_text(d, fields["titular"], W - 2 * M, 430, sizes=(96, 88, 80, 72, 64, 56), bold=True)
+    y = draw_lines(d, (M, 380), ls, f, lh, "white") + 30
     d.line((M, y, M + 140, y), fill=soft, width=6)
     sub = f"Aprobado en la {session_title(sdoc)} del {date_long(sdoc.get('date'))}"
-    f, ls, lh = fit_text(d, sub, W - 2 * M, 120, sizes=(40, 36))
-    draw_lines(d, (M, y + 50), ls, f, lh, soft)
+    f, ls, lh = fit_text(d, sub, W - 2 * M, 106, sizes=(40, 36))
+    y = draw_lines(d, (M, y + 36), ls, f, lh, soft) + 24
     x = M
     for t in tags[:2]:
-        x = chip(d, x, H - 290, strip_emoji(t), "#4A2606")  # los colores de etiqueta se pierden sobre el naranja
+        x = chip(d, x, y, strip_emoji(t), "#4A2606")  # los colores de etiqueta se pierden sobre el naranja
     d.text((M, H - 150), "Qué cambia, a quién afecta y desde cuándo  →", font=font(36, True), fill="white")
     return img
 
@@ -627,8 +665,8 @@ def destacado_slide(sdoc, fields):
     blocks = []
     for key, question in QUESTIONS:
         answer = fields[key] or NO_INFO
-        f, ls, lh = fit_text(MEASURE, answer, W - 2 * M, 260, sizes=(52, 48, 44, 40, 36, 32), bold=bool(fields[key]))
-        blocks += [("text", [question], font(36, True), 48, DESTACADO[0], 10), ("text", ls, f, lh, INK if fields[key] else MUTED, 56)]
+        blocks += [text_block(question, (36,), DESTACADO[0], 10, bold=True),
+                   text_block(answer, (52, 48, 44, 40, 36, 32), INK if fields[key] else MUTED, 56, 260, bold=bool(fields[key]))]
     return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", "2/2", DESTACADO[0])
 
 
