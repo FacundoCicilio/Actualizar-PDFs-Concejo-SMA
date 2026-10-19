@@ -8,7 +8,7 @@ on:
       tipo:
         description: "Tipo de post"
         type: choice
-        options: [orden-del-dia, que-se-aprobo, destacado]
+        options: [orden-del-dia, que-se-aprobo, destacado, boletin]
         default: orden-del-dia
       anio:
         description: "Año (vacío = el actual)"
@@ -31,7 +31,7 @@ jobs:
       - name: Install deps
         run: |
           pip install -r requirements.txt
-      # Abre un Issue (uno por nota en "destacado") con la vista previa y la verificación del token (solo consulta /me); no publica ni toca el estado.
+      # Abre un Issue (uno por nota en "destacado", uno por ordenanza en "boletin") con la vista previa y la verificación del token (solo consulta /me); no publica ni toca el estado.
       - name: Vista previa
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -29,6 +29,7 @@ APROBADO = ("#2E6B3F", "#CFE3D4")   # acento (fondo) y suave de "Qué se aprobó
 DESTACADO = ("#8A4B0F", "#F1DCC4")
 PUESTA = ("#4B2E6F", "#DCD0EA")
 FUENTE = "Fuente: Prensa del Concejo Deliberante (prensacd.cdsma.gob.ar)"
+FUENTE_BO = "Fuente: Boletín Oficial Municipal (boletinoficial.sma.gob.ar)"
 
 # Peso de cada impacto para ordenar los ítems: primero lo que toca el bolsillo y los servicios.
 IMPACT_WEIGHT = {
@@ -607,6 +608,10 @@ DESTACADO_SYSTEM = (
     "el titular no la presenta como solo una baja ni como solo una suba: nombra lo que se modificó. Ejemplo: "
     "'El Concejo modificó la Tasa COM y la tasa ENSATUR para comercios'."
 )
+# Mismo pedido sobre el articulado de una ordenanza del Boletín Oficial (sin nota de Prensa).
+ORDENANZA_SYSTEM = (DESTACADO_SYSTEM.replace("a partir de una nota de prensa", "a partir del articulado de la ordenanza "
+                                             "publicada en el Boletín Oficial Municipal")
+                    .replace("la nota", "la ordenanza"))
 # Controles del titular: el prompt lo pide, pero si Haiku igual califica o simplifica, el titular se descarta.
 VALORATIVE_PAT = re.compile(r"\b(?:alivi\w*|benefici(?!ari)\w*|golpe\w*|ayud\w*|mejor[ae]s?|perjudic\w*|perjuicio\w*|castig\w*"
                             r"|tarifazo\w*|premi\w*|logr\w*|hist[oó]ric\w*|important\w*|impuls\w*|favorec\w*)\b", re.I)
@@ -618,6 +623,7 @@ DESTACADO_FORMAT = {"format": {"type": "json_schema", "schema": {
     "required": list(DESTACADO_FIELDS), "additionalProperties": False}}}
 QUESTIONS = (("que_cambia", "¿Qué cambia?"), ("a_quien_afecta", "¿A quién afecta?"), ("desde_cuando", "¿Desde cuándo?"))
 NO_INFO = "La nota no lo informa."
+NO_INFO_ORD = "La ordenanza no lo informa."
 
 
 def numbers(text):
@@ -659,12 +665,13 @@ def titular_ok(titular, note):
     return True
 
 
-def destacado_fields(note):
+def destacado_fields(note, ordenanza=False):
     """{titular, que_cambia, a_quien_afecta, desde_cuando} o None si no hay titular usable. Un campo vacío o con cifras
-    que no están en la nota queda vacío ("la nota no lo informa"). Lanza anthropic.APIError si la API falla."""
+    que no están en la nota queda vacío ("la nota no lo informa"). Lanza anthropic.APIError si la API falla.
+    ordenanza: el texto es el articulado de una ordenanza del Boletín Oficial, no una nota de Prensa."""
     for _ in range(2):  # la respuesta varía: un segundo intento suele traer un titular usable
         try:
-            data = json.loads(_complete(DESTACADO_SYSTEM, note, DESTACADO_FORMAT) or "")
+            data = json.loads(_complete(ORDENANZA_SYSTEM if ordenanza else DESTACADO_SYSTEM, note, DESTACADO_FORMAT) or "")
         except ValueError:
             continue
         fields = {k: anonymize(str(data.get(k) or "").strip()) for k in DESTACADO_FIELDS}
@@ -675,12 +682,12 @@ def destacado_fields(note):
     return None
 
 
-def destacado(note):
+def destacado(note, ordenanza=False):
     """(campos, error) como note_lines: error es un texto para avisar, sin datos sensibles, o None."""
     if not api_key():
         return None, "Falta ANTHROPIC_API_KEY."
     try:
-        return destacado_fields(note), None
+        return destacado_fields(note, ordenanza), None
     except anthropic.APIError as e:
         return None, f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
 
@@ -713,7 +720,7 @@ def render_aprobado(sdoc, notes, out_dir, prefix="aprobado", ext="png"):
     return save_slides(slides, out_dir, prefix, ext, aprobado_caption(sdoc, notes))
 
 
-def destacado_cover(sdoc, fields, tags):
+def destacado_cover(sdoc, fields, tags, ordenanza=None):
     accent, soft = DESTACADO
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
@@ -724,6 +731,8 @@ def destacado_cover(sdoc, fields, tags):
     y = draw_lines(d, (M, 380), ls, f, lh, "white") + 30
     d.line((M, y, M + 140, y), fill=soft, width=6)
     sub = f"Aprobado en la {session_title(sdoc)} del {date_long(sdoc.get('date'))}"
+    if ordenanza:
+        sub += f" · Ordenanza {ordenanza['label']}"
     f, ls, lh = fit_text(d, sub, W - 2 * M, 106, sizes=(40, 36))
     y = draw_lines(d, (M, y + 36), ls, f, lh, soft) + 24
     x = M
@@ -736,8 +745,14 @@ def destacado_cover(sdoc, fields, tags):
 ANSWER_SIZES, ANSWER_MAX_H = (52, 48, 44, 40, 36, 32), 260
 
 
-def destacado_slide(sdoc, fields):
-    answers = [(fields[key] or NO_INFO, bool(fields[key])) for key, _ in QUESTIONS]
+def source_ref(ordenanza=None):
+    """Pie de las placas: la Prensa del Concejo o el número de Boletín Oficial de la ordenanza."""
+    return f"Fuente: Boletín Oficial N° {ordenanza['boletin']}" if ordenanza else "Fuente: Prensa del Concejo Deliberante"
+
+
+def destacado_slide(sdoc, fields, ordenanza=None):
+    no_info = NO_INFO_ORD if ordenanza else NO_INFO
+    answers = [(fields[key] or no_info, bool(fields[key])) for key, _ in QUESTIONS]
     # un solo tamaño para las tres respuestas: el más grande con el que entran todas en su caja
     size = next((s for s in ANSWER_SIZES
                  if all(len(wrap(MEASURE, a, font(s, bold), W - 2 * M)) * int(s * 1.32) <= ANSWER_MAX_H for a, bold in answers)),
@@ -746,21 +761,25 @@ def destacado_slide(sdoc, fields):
     for (_, question), (answer, informed) in zip(QUESTIONS, answers):
         blocks += [text_block(question, (36,), DESTACADO[0], 10, bold=True),
                    text_block(answer, (size,), INK if informed else MUTED, 56, ANSWER_MAX_H, bold=informed)]
-    return content_slide("DESTACADO", session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", "2/2", DESTACADO[0])
+    header = f"Ordenanza {ordenanza['label']}" if ordenanza else session_title(sdoc)
+    return content_slide("DESTACADO", header, blocks, source_ref(ordenanza), "2/2", DESTACADO[0])
 
 
-def destacado_caption(sdoc, fields):
+def destacado_caption(sdoc, fields, ordenanza=None):
     lines = [f"📌 Destacado: {fields['titular']}", ""]
-    lines += [f"{q} {fields[k] or NO_INFO}" for k, q in QUESTIONS]
-    lines += ["", f"Aprobado por el Concejo Deliberante en la {session_title(sdoc)} ({date_long(sdoc.get('date'))}).",
-              FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    lines += [f"{q} {fields[k] or (NO_INFO_ORD if ordenanza else NO_INFO)}" for k, q in QUESTIONS]
+    approved = f"Aprobado por el Concejo Deliberante en la {session_title(sdoc)} ({date_long(sdoc.get('date'))})"
+    if ordenanza:
+        approved += f": Ordenanza {ordenanza['label']}, publicada en el Boletín Oficial N° {ordenanza['boletin']}"
+    lines += ["", approved + ".", FUENTE_BO if ordenanza else FUENTE, "Más info: link en la bio.", "", HASHTAGS]
     return "\n".join(lines)
 
 
-def render_destacado(sdoc, fields, tags, out_dir, prefix="destacado", ext="png"):
-    """Dos placas (la API de Instagram publica un carrusel con 2 o más imágenes; así se reusa el mismo circuito)."""
-    slides = [destacado_cover(sdoc, fields, tags), destacado_slide(sdoc, fields)]
-    return save_slides(slides, out_dir, prefix, ext, destacado_caption(sdoc, fields))
+def render_destacado(sdoc, fields, tags, out_dir, prefix="destacado", ext="png", ordenanza=None):
+    """Dos placas (la API de Instagram publica un carrusel con 2 o más imágenes; así se reusa el mismo circuito).
+    ordenanza: {label, boletin} si sale del Boletín Oficial (número en la placa y fuente en el pie)."""
+    slides = [destacado_cover(sdoc, fields, tags, ordenanza), destacado_slide(sdoc, fields, ordenanza)]
+    return save_slides(slides, out_dir, prefix, ext, destacado_caption(sdoc, fields, ordenanza))
 
 
 # ------------------------------------------------------------------ puesta al día (un solo post para retomar la cuenta)
@@ -798,21 +817,26 @@ THEME_MESSAGES = {
 
 
 def puesta_slide(item, pos, n, page, total):
-    """item: {sdoc, titular, line, impact_tags} o, agrupado por tema, {titular, lines, impact_tags}."""
+    """item: {sdoc, titular, line, impact_tags[, ordenanza]} o, agrupado, {titular, lines, impact_tags[, kicker, ref]}.
+    ordenanza: {label, boletin} si la decisión sale del Boletín Oficial."""
     tags = (item.get("impact_tags") or [])[:2]
     msg = THEME_MESSAGES.get(tags[0]) or IMPACT_MESSAGES.get(tags[0], "") if tags else ""
     if "lines" in item:  # varias decisiones del mismo tema, de distintas sesiones
-        blocks = [text_block("VARIAS SESIONES", (32, 28), PUESTA[0], 28, bold=True),
+        blocks = [text_block(item.get("kicker", "VARIAS SESIONES"), (32, 28), PUESTA[0], 28, bold=True),
                   text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 200, bold=True)]
         blocks += [text_block(f"• {line}", (40, 36, 34, 32, 30), INK, 18, 200) for line in item["lines"]]
     else:
         sdoc = item["sdoc"]
-        blocks = [text_block(f"{session_title(sdoc)} · {date_long(sdoc['date'])}".upper(), (32, 28), PUESTA[0], 28, bold=True),
+        kicker = f"{session_title(sdoc)} · {date_long(sdoc['date'])}"
+        if item.get("ordenanza"):  # sin la fecha larga: no entra en una línea (la fecha queda en el texto del post)
+            kicker = f"{session_title(sdoc)} · Ordenanza {item['ordenanza']['label']}"
+        blocks = [text_block(kicker.upper(), (32, 28), PUESTA[0], 28, bold=True),
                   text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 300, bold=True),
                   text_block("En criollo:", (36,), PUESTA[0], 8, bold=True),
                   text_block(item["line"], (44, 40, 36, 34, 32), INK, 44, 320)]
     blocks += impact_blocks(tags, msg)
-    return content_slide("PUESTA AL DÍA", "", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
+    ref = item.get("ref") or source_ref(item.get("ordenanza"))
+    return content_slide("PUESTA AL DÍA", "", blocks, ref, f"{page}/{total}", PUESTA[0])
 
 
 AUDIENCIA_TITLE = "Pasaron por audiencia pública"
@@ -868,13 +892,16 @@ def puesta_caption(start, today, items, auds=()):
     lines = [f"🗓️ Puesta al día: lo más importante que aprobó el Concejo desde {month_since(start, today)}", ""]
     for it in items:
         if "lines" in it:
-            lines += [f"• {it['titular']}:"] + [f"   – {line}" for line in it["lines"]]
+            lines += [f"• {it['titular']}{':' if it['lines'] else ''}"] + [f"   – {line}" for line in it["lines"]]
         else:
-            lines.append(f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])})")
+            ord_txt = f", Ordenanza {it['ordenanza']['label']}" if it.get("ordenanza") else ""
+            lines.append(f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])}{ord_txt})")
     if auds:
         lines += ["", f"{AUDIENCIA_TITLE}:"] + [f"• {a['line']} (audiencia del {a['fecha']:%d/%m})" for a in auds]
         lines += [AUDIENCIA_NOTE]
-    lines += ["", "Deslizá para ver el detalle 👉", FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    boletin = any(it.get("ordenanza") or "Boletín" in (it.get("ref") or "") for it in items)
+    lines += ["", "Deslizá para ver el detalle 👉", FUENTE] + ([FUENTE_BO] if boletin else [])
+    lines += ["Más info: link en la bio.", "", HASHTAGS]
     return "\n".join(lines)
 
 

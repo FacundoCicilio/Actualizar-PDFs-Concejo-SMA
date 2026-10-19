@@ -1,5 +1,6 @@
 # Publica en Instagram cada orden del día nueva y, desde las notas de Prensa (prensa.py), el resumen "Qué se aprobó"
-# de cada sesión (7 días después de la sesión) y un "Destacado" por cada nota de Bolsillo, Servicios u Obras.
+# de cada sesión (7 días después de la sesión) y un "Destacado" por cada nota de Bolsillo, Servicios u Obras; desde el
+# Boletín Oficial (boletin.py), un "Destacado" por cada ordenanza de esos temas que Prensa no cubrió.
 # Corre en el cron, después de auto_fetch.py.
 #   python instagram_publisher.py                          # corrida normal
 #   python instagram_publisher.py --prueba 23 [--anio 2026] [--tipo que-se-aprobo]  # Issue de vista previa: no publica
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import requests
 
+import boletin
 import instagram_carousel as ic
 import prensa
 from hf_dataset_store import DATASET_REPO_ID, load_index, load_json, load_processed_json, save_json
@@ -34,9 +36,9 @@ REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar
 REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación
 CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
 APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen las notas de la sesión
-TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado"}
+TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado", "boletin": "boletin"}
 KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos",
-              "destacado": "los destacados nuevos"}
+              "destacado": "los destacados nuevos", "boletin": "los destacados del Boletín Oficial nuevos"}
 LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5",
           "instagram-puesta-al-dia": "4B2E6F"}
 PUESTA_DEFAULT_START = date(2026, 6, 1)  # si no se puede saber la fecha del último post
@@ -45,6 +47,7 @@ ERROR_TITLES = {
     "publicacion": "Instagram: falló la publicación",
     "anthropic": "Instagram: falló la API de Anthropic",
     "prensa": "Instagram: no se pudieron leer las notas de Prensa",
+    "boletin": "Instagram: no se pudo leer el Boletín Oficial",
     "otro": "Instagram: error inesperado",
 }
 
@@ -312,14 +315,17 @@ def prepare_aprobado(s, folder):
 def prepare_destacado(s, note, folder):
     """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption, vigente hasta) o None."""
     sdoc = prensa.session_doc(s)
-    fields, error = ic.destacado(prensa.note_text(note))
+    ordenanza = note.get("ordenanza")  # del Boletín Oficial: articulado en lugar de nota de Prensa
+    fields, error = ic.destacado(prensa.note_text(note), ordenanza=bool(ordenanza))
     if error:
         raise AnthropicFailure(f"{error} No se generó el destacado de la nota {note['link']}; se reintenta en la próxima corrida.")
     if not fields:
         return None
     with tempfile.TemporaryDirectory() as tmp:
-        paths = ic.render_destacado(sdoc, fields, note["impact_tags"], tmp, ext="jpg")
+        paths = ic.render_destacado(sdoc, fields, note["impact_tags"], tmp, ext="jpg", ordenanza=ordenanza)
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        if ordenanza and boletin.leaks(caption):
+            raise PublishError(f"El destacado de la Ordenanza {ordenanza['label']} nombraba a un particular: no se publica.")
         urls = upload_images(paths, folder)
     end = prensa.vigencia_hasta(note)
     return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat()
@@ -495,17 +501,18 @@ def run():
         except PublishError as e:
             report_error("publicacion", f"Documento {doc_id}: {e}")
             errors += 1
-    errors += run_prensa(state)
-    return 1 if errors else 0
-
-
-def run_prensa(state):
-    """"Qué se aprobó" y destacados desde las notas de Prensa. Devuelve la cantidad de errores."""
     try:
         notes = prensa.load_notes()
     except (requests.RequestException, ValueError) as e:
         report_error("prensa", f"El sitio de Prensa no respondió bien ({type(e).__name__}).")
         return 1
+    errors += run_prensa(state, notes)
+    errors += run_boletin(state, notes)
+    return 1 if errors else 0
+
+
+def run_prensa(state, notes):
+    """"Qué se aprobó" y destacados desde las notas de Prensa. Devuelve la cantidad de errores."""
     if "prensa_since" not in state:  # primera vez: las sesiones anteriores a hoy no se publican
         state["prensa_since"] = now().date().isoformat()
         save_state(state, "Instagram: Prensa desde hoy (sesiones anteriores marcadas como vistas)")
@@ -520,24 +527,74 @@ def run_prensa(state):
                 for n in destacables(s, now().date())]
         if now().date() >= s["date"] + APROBADO_WAIT:
             jobs.append((f"aprobado:{s['key']}", "aprobado", lambda folder, s=s: prepare_aprobado(s, folder)))
-        for key, kind, prep in jobs:
-            if key in state["seen"]:
-                continue
-            try:
-                result = prep(f"{key.replace(':', '-')}-{now():%Y%m%d%H%M%S}")
-                if result is None:
-                    print(f"{key}: sin texto usable; no se publica.")
-                else:
-                    enqueue(state, key, kind, *result)
-                state["seen"].append(key)  # solo si se resolvió; si falló, se reintenta mañana
-                save_state(state, f"Instagram: procesado {key}")
-            except AnthropicFailure as e:
-                report_error("anthropic", str(e))
-                errors += 1
-            except PublishError as e:
-                report_error("publicacion", f"{key}: {e}")
-                errors += 1
+        errors += run_jobs(state, jobs)
     return errors
+
+
+def run_jobs(state, jobs):
+    """[(clave, tipo, prep)]: genera y encola cada post no visto. Devuelve la cantidad de errores."""
+    errors = 0
+    for key, kind, prep in jobs:
+        if key in state["seen"]:
+            continue
+        try:
+            result = prep(f"{key.replace(':', '-')}-{now():%Y%m%d%H%M%S}")
+            if result is None:
+                print(f"{key}: sin texto usable; no se publica.")
+            else:
+                enqueue(state, key, kind, *result)
+            state["seen"].append(key)  # solo si se resolvió; si falló, se reintenta mañana
+            save_state(state, f"Instagram: procesado {key}")
+        except AnthropicFailure as e:
+            report_error("anthropic", str(e))
+            errors += 1
+        except PublishError as e:
+            report_error("publicacion", f"{key}: {e}")
+            errors += 1
+    return errors
+
+
+def boletin_candidates(store, notes, today, excluir=frozenset()):
+    """Ordenanzas que irían como destacado, con su cruce con Prensa: [(nota, sesión, "nueva"|"duplicado"|"dudoso",
+    nota de Prensa parecida o None)]. Sin las de particulares, las sin sesión ni las de plazo vencido. Del Boletín solo
+    van temas de fondo o Bolsillo: las obras y servicios puntuales (una contratación, un tendido) no."""
+    sessions = prensa.sessions(notes)
+    out = []
+    for o in store["ordenanzas"].values():
+        if "text" not in o or not o.get("session") or f"ord-{o['numero']}" in excluir:
+            continue
+        n, s = boletin.as_note(o), boletin.session_of(o)
+        fondo = prensa.themes(n) or "💰 Bolsillo" in prensa.destacado_tags(n)
+        if fondo and prensa.is_destacado(n) and not prensa.vencida(n, today):
+            out.append((n, s, *boletin.match(n, sessions.get(s["key"], {}).get("notes", []))))
+    return out
+
+
+def run_boletin(state, notes):
+    """Destacados de las ordenanzas del Boletín Oficial que Prensa no cubrió (las dudosas no salen; las de
+    particulares, solo agregadas en la puesta al día). Devuelve la cantidad de errores."""
+    try:
+        store = boletin.load(now().date())
+    except (requests.RequestException, ValueError, RuntimeError) as e:
+        report_error("boletin", f"El sitio del Boletín Oficial no respondió bien ({type(e).__name__}).")
+        return 1
+    last = max((int(k) for k in store["boletines"]), default=0)
+    if "boletin_desde" not in state:  # primera vez: los boletines ya publicados no salen
+        state["boletin_desde"] = last
+        save_state(state, "Instagram: Boletín Oficial desde el próximo número")
+        print(f"Boletín Oficial: primera corrida; se publican las ordenanzas de los boletines posteriores al N° {last}.")
+        return 0
+    jobs = []
+    for n, s, status, best in boletin_candidates(store, notes, now().date()):
+        if n["ordenanza"]["boletin"] <= state["boletin_desde"]:
+            continue
+        if status == "nueva":
+            jobs.append((f"destacado:{n['id']}", "boletin", lambda folder, n=n, s=s: prepare_destacado(s, n, folder)))
+        elif f"destacado:{n['id']}" not in state["seen"]:
+            print(f"Ordenanza {n['ordenanza']['label']}: {status} con la nota {best['id']} de Prensa; no se publica.")
+            state["seen"].append(f"destacado:{n['id']}")
+            save_state(state, f"Instagram: Ordenanza {n['ordenanza']['label']} ya cubierta por Prensa")
+    return run_jobs(state, jobs)
 
 
 def check_token():
@@ -593,6 +650,27 @@ def prensa_preview(session, year, kind, stamp):
     return out
 
 
+def boletin_preview(session, year, stamp):
+    """Destacados del Boletín Oficial de una sesión (hasta 3), y por qué no sale cada ordenanza cubierta por Prensa."""
+    especial = str(session)[:1] in "Ee"
+    key = prensa.session_key(str(session).lstrip("EeOo"), year, "Especial" if especial else "Ordinaria")
+    today = now().date()
+    cands = [c for c in boletin_candidates(boletin.load(today, save=False), prensa.load_notes(save=False), today)
+             if c[1]["key"] == key]
+    if not cands:
+        return [(f"Boletín · sesión {session}", "**PRUEBA:** el Boletín Oficial todavía no tiene ordenanzas de esta sesión "
+                                               "con tema de fondo o de Bolsillo, así que no habría destacado.")]
+    out = [(f"Boletín · Ordenanza {n['ordenanza']['label']}",
+            f"**PRUEBA:** no saldría: es {status} con la nota [{best['id']}]({best['link']}) de Prensa.")
+           for n, _, status, best in cands if status != "nueva"]
+    for n in prensa.rank([n for n, _, status, _ in cands if status == "nueva"])[:3]:
+        s = next(s for m, s, _, _ in cands if m is n)
+        r = prepare_destacado(s, n, f"prueba/{n['id']}-{stamp}")
+        out.append((r[0], preview_body(r[1], r[2])) if r else (f"Boletín · Ordenanza {n['ordenanza']['label']}",
+                                                               "**PRUEBA:** sin texto usable."))
+    return out
+
+
 def run_preview(session_number, year, tipo="orden-del-dia"):
     """Workflow "Probar Instagram": Issue con la vista previa de una sesión y la verificación del token, para cada
     tipo de post. No publica ni toca el estado."""
@@ -601,7 +679,12 @@ def run_preview(session_number, year, tipo="orden-del-dia"):
     ensure_setup()
     stamp = f"{now():%Y%m%d%H%M%S}"
     kind = TIPOS[tipo]
-    previews = od_preview(session_number, year, stamp) if kind == "od" else prensa_preview(session_number, year, kind, stamp)
+    if kind == "od":
+        previews = od_preview(session_number, year, stamp)
+    elif kind == "boletin":
+        previews = boletin_preview(session_number, year, stamp)
+    else:
+        previews = prensa_preview(session_number, year, kind, stamp)
     for label, body in previews:
         number, url = create_issue(preview_title(label, prueba=True), "\n".join(check) + "\n" + body, ["instagram-prueba"])
         print(f"Vista previa de prueba: {url}")
@@ -624,14 +707,16 @@ def period_start():
     return last.date(), f"fecha del último post de @{IG_USERNAME}"
 
 
-def puesta_items(notes, start, today, excluir, skip_keys, slots=ic.MAX_ITEMS):
+def puesta_items(notes, start, today, excluir, skip_keys, slots=ic.MAX_ITEMS, extra=()):
     """Notas que serían destacado, de sesiones entre start y today, sin plazo vencido, sin las excluidas ni las ya
     publicadas como destacado; las de mayor peso primero. Si sobran (más que slots), se agrupa solo lo necesario: la
     nota suelta de menor peso que comparte tema con otra placa se suma a esa placa, hasta que entren; si no hay temas
-    repetidos, se recortan las de menor peso. Devuelve (ítems para las placas, notas descartadas por texto no usable)."""
+    repetidos, se recortan las de menor peso. extra: [(ordenanza como nota, sesión)] del Boletín Oficial que Prensa no
+    cubrió. Devuelve (ítems para las placas, notas descartadas por texto no usable)."""
     sessions = prensa.sessions(notes)
-    candidates = [(n, s) for s in sessions.values() if start <= s["date"] <= today
-                  for n in destacables(s, today) if str(n["id"]) not in excluir and f"destacado:{n['id']}" not in skip_keys]
+    candidates = [(n, s) for s in sessions.values() for n in destacables(s, today)] + list(extra)
+    candidates = [(n, s) for n, s in candidates if start <= s["date"] <= today
+                  and str(n["id"]) not in excluir and f"destacado:{n['id']}" not in skip_keys]
     ranked = prensa.rank([n for n, _ in candidates])
     session_of = {n["id"]: s for n, s in candidates}
     units = [(prensa.group_key(n), [n]) for n in ranked]
@@ -653,7 +738,7 @@ def puesta_items(notes, start, today, excluir, skip_keys, slots=ic.MAX_ITEMS):
         made = []
         for n in unit:  # Haiku solo para las notas que van a salir
             text = prensa.note_text(n)
-            fields, error = ic.destacado(text)
+            fields, error = ic.destacado(text, ordenanza=bool(n.get("ordenanza")))
             if error:
                 raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
             line = fields and (fields["que_cambia"] or ic.note_line(text))
@@ -665,24 +750,57 @@ def puesta_items(notes, start, today, excluir, skip_keys, slots=ic.MAX_ITEMS):
         if len(made) == 1:
             n, fields, line = made[0]
             items.append({"note": n, "sdoc": prensa.session_doc(session_of[n["id"]]), "titular": fields["titular"],
-                          "line": line, "impact_tags": chips(n)})
+                          "line": line, "impact_tags": chips(n), "ordenanza": n.get("ordenanza")})
         elif made:
+            label = lambda n: f", Ordenanza {n['ordenanza']['label']}" if n.get("ordenanza") else ""  # noqa: E731
             items.append({"notes": [n for n, _, _ in made], "titular": f"{key}: {len(made)} decisiones",
-                          "lines": [f"{f['titular']} ({ic.session_title(prensa.session_doc(session_of[n['id']]))})"
+                          "lines": [f"{f['titular']} ({ic.session_title(prensa.session_doc(session_of[n['id']]))}{label(n)})"
                                     for n, f, _ in made],
-                          "impact_tags": chips(made[0][0])})
+                          "impact_tags": chips(made[0][0]), "ref": group_ref([n for n, _, _ in made])})
     return items, dropped
 
 
-def puesta_audiencias(notes, start, today, excluir):
-    """Audiencias públicas sobre tierras y concesiones ya realizadas en el período: [{numero, fecha, line, ids}]."""
+def group_ref(notes):
+    """Pie de una placa agrupada: de dónde salen sus decisiones (None: solo Prensa)."""
+    bo = sorted({n["ordenanza"]["boletin"] for n in notes if n.get("ordenanza")})
+    if not bo:
+        return None
+    nums = "Boletín Oficial N° " + ", ".join(map(str, bo))
+    return f"Fuente: {nums}" if all(n.get("ordenanza") for n in notes) else f"Fuente: Prensa del Concejo y {nums}"
+
+
+def puesta_adjudicaciones(store, start, today, excluir):
+    """Una placa con las adjudicaciones de tierras a particulares del período, solo agregadas por chacra: ni nombres,
+    ni lote, ni manzana, ni número de ordenanza (en un pueblo chico identifican a la persona). None si no hay."""
+    ords = sorted((o for o in store["ordenanzas"].values() if o.get("adjudicacion") and o.get("session")
+                   and start <= date.fromisoformat(o["session"]["date"]) <= today and f"ord-{o['numero']}" not in excluir),
+                  key=lambda o: o["numero"])
+    groups = boletin.adjudicaciones(ords)
+    if not groups:
+        return None
+    line = lambda g: f"Se adjudicaron {g['lotes']} lote{'s' if g['lotes'] != 1 else ''} en Chacra {g['chacra']} a familias"  # noqa: E731
+    if len(groups) == 1:
+        titular, lines = line(groups[0]), []
+    else:
+        titular = f"Se adjudicaron {sum(g['lotes'] for g in groups)} lotes a familias"
+        lines = [line(g) for g in groups]
+    return {"notes": [{"id": f"ord-{o['numero']}", "link": o["url"]} for o in ords], "titular": titular, "lines": lines,
+            "impact_tags": ["Tierras"], "kicker": "TIERRAS · BOLETÍN OFICIAL",
+            "ref": "Fuente: Boletín Oficial N° " + ", ".join(map(str, sorted({o["boletin"] for o in ords})))}
+
+
+def puesta_audiencias(notes, start, today, excluir, ord_notes=()):
+    """Audiencias públicas sobre tierras y concesiones ya realizadas en el período y todavía sin ordenanza en el Boletín
+    Oficial. Devuelve ([{numero, fecha, line, ids}], [(audiencia, ordenanza que la resolvió)])."""
     auds = [a for a in prensa.audiencias(notes, start, today) if not {str(n["id"]) for n in a["notes"]} & excluir]
+    decididas = [(a, o) for a in auds for o in [boletin.decided(a["notes"], ord_notes)] if o]
+    auds = [a for a in auds if not any(a is d for d, _ in decididas)]
     lines, error = ic.audiencia_lines([prensa.note_text(a["notes"][0]) for a in auds],
                                       [prensa.audiencia_subject(a["notes"][0]) for a in auds])
     if error and auds:
         raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
     return [{"numero": a["numero"], "fecha": a["fecha"], "line": line, "ids": [n["id"] for n in a["notes"]]}
-            for a, line in zip(auds, lines)]
+            for a, line in zip(auds, lines)], decididas
 
 
 def item_ids(it):
@@ -697,11 +815,21 @@ def puesta_preview(excluir):
     start, why = period_start()
     today = now().date()
     notes = prensa.load_notes()
-    auds = puesta_audiencias(notes, start, today, excluir)
+    head = [f"Período: sesiones desde el **{start:%d/%m/%Y}** ({why}) hasta hoy.", ""]
+    try:
+        store = boletin.load(today)
+    except (requests.RequestException, ValueError, RuntimeError) as e:
+        store = {"boletines": {}, "ordenanzas": {}}
+        head += [f"⚠️ No se pudo leer el Boletín Oficial ({type(e).__name__}): sale solo con Prensa.", ""]
+    cands = [c for c in boletin_candidates(store, notes, today, excluir) if start <= c[1]["date"] <= today]
+    ord_notes = [boletin.as_note(o) for o in store["ordenanzas"].values() if "text" in o]
+    auds, decididas = puesta_audiencias(notes, start, today, excluir, ord_notes)
+    adj = puesta_adjudicaciones(store, start, today, excluir)
     items, dropped = puesta_items(notes, start, today, excluir,
                                   set(state["seen"]) | set(state["pending"]) | set(state["published"]),
-                                  slots=ic.MAX_ITEMS - (1 if auds else 0))
-    head = [f"Período: sesiones desde el **{start:%d/%m/%Y}** ({why}) hasta hoy.", ""]
+                                  slots=ic.MAX_ITEMS - (1 if auds else 0) - (1 if adj else 0),
+                                  extra=[(n, s) for n, s, status, _ in cands if status == "nueva"])
+    items += [adj] if adj else []
     if excluir:
         head += [f"Notas excluidas a pedido: {', '.join(sorted(excluir))}.", ""]
     if dropped:
@@ -715,6 +843,9 @@ def puesta_preview(excluir):
     head += ["### Notas incluidas (id para el campo `excluir`)", ""]
     for it in items:
         if "lines" in it:
+            if it is adj:  # adjudicaciones: ni números de ordenanza ni ids, tampoco en el Issue
+                head += [f"- {it['titular']}"] + [f"  - {line}" for line in it["lines"]]
+                continue
             head += [f"- {it['titular']}:"] + [f"  - `{n['id']}` {line} — [nota]({n['link']})" for n, line in zip(it["notes"], it["lines"])]
         else:
             head += [f"- `{it['note']['id']}` {it['titular']} — [nota]({it['note']['link']})"]
@@ -722,11 +853,26 @@ def puesta_preview(excluir):
         head += ["", f"### {ic.AUDIENCIA_TITLE} (ids para `excluir`)", ""]
         head += [f"- {', '.join(f'`{i}`' for i in a['ids'])} N° {a['numero']}: {a['line']} (audiencia del {a['fecha']:%d/%m})"
                  for a in auds]
+    if decididas:
+        head += ["", "### Audiencias que ya tienen ordenanza (salen de esa placa)", ""]
+        head += [f"- N° {a['numero']}: Ordenanza {o['ordenanza']['label']} (`{o['id']}`)" for a, o in decididas]
+    dudosas = [(n, best) for n, _, status, best in cands if status == "dudoso"]
+    if dudosas:
+        head += ["", "### Ordenanzas parecidas a una nota de Prensa (no se publican; revisalas)", ""]
+        head += [f"- `{n['id']}` Ordenanza {n['ordenanza']['label']}: {n['title'][:120]} (¿es la nota `{best['id']}`?)"
+                 for n, best in dudosas]
+    revisar = [o for o in store["ordenanzas"].values() if o.get("a_revisar") and (o.get("promulgada") or "") >= start.isoformat()]
+    if revisar:
+        head += ["", "### Ordenanzas sin sesión identificada (no se publican)", ""]
+        head += [f"- Ordenanza {o['label']} (Boletín Oficial N° {o['boletin']})" for o in revisar]
     head += ["", "**No se publica nada todavía.** Si está bien, corré el workflow **Puesta al día** con `publicar = sí`: "
                  "publica exactamente estas placas y este texto. Para sacar notas, corrélo de nuevo con `excluir`."]
     with tempfile.TemporaryDirectory() as tmp:
         paths = ic.render_puesta(start, today, items, tmp, ext="jpg", audiencias=auds)
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        shown = "\n".join([caption] + [it.get("line", "") for it in items] + [x for it in items for x in it.get("lines", [])])
+        if boletin.leaks(shown):
+            raise PublishError("La puesta al día nombraba a un particular: no se generó. Revisá las ordenanzas del período.")
         urls = upload_images(paths, f"puesta-{now():%Y%m%d%H%M%S}")
     old = state.get("puesta")
     number, url = create_issue(f"Vista previa Instagram: Puesta al día desde {ic.month_since(start, today)}",

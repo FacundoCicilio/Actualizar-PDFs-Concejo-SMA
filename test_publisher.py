@@ -110,6 +110,7 @@ class PublisherTest(unittest.TestCase):
         self.index = [rec("viejo1", 21), rec("viejo2", 22)]
         self.docs = {"viejo1": GENERAL, "viejo2": GENERAL}
         self.notes = {"1": nota(1, 23, 8, INTERES)}  # sesión anterior a la primera corrida
+        self.boletin = {"boletines": {}, "ordenanzas": {}}
         self.gh, self.ig, self.clock = FakeGitHub(), FakeIG(), [T0]
         self.refreshes = []
         tmp = tempfile.mkdtemp()
@@ -128,9 +129,10 @@ class PublisherTest(unittest.TestCase):
             mock.patch.object(pub.time, "sleep", lambda s: None),
             mock.patch.object(ic, "criollo_lines", lambda items: ([None] * len(items), None)),
             mock.patch.object(ic, "note_lines", lambda notes: (["El Concejo aprobó algo."] * len(notes), None)),
-            mock.patch.object(ic, "destacado", lambda note: (dict(CAMPOS), None)),
+            mock.patch.object(ic, "destacado", lambda note, **kw: (dict(CAMPOS), None)),
             mock.patch.object(ic, "audiencia_lines", lambda notes, fallbacks: (list(fallbacks), None)),
             mock.patch.object(prensa, "load_notes", lambda save=True: self.notes),
+            mock.patch.object(pub.boletin, "load", lambda today, save=True: self.boletin),
             mock.patch.object(pub, "_token", None),
             mock.patch("builtins.print"),
         ]
@@ -354,7 +356,7 @@ class PublisherTest(unittest.TestCase):
         self.run_pub()
         self.run_pub(1)
         self.nueva_nota(30, 25, 22, TASA)
-        with mock.patch.object(ic, "destacado", lambda note: (None, "La API de Anthropic falló (APIConnectionError): ")):
+        with mock.patch.object(ic, "destacado", lambda note, **kw: (None, "La API de Anthropic falló (APIConnectionError): ")):
             self.assertEqual(self.run_pub(24 * 4 + 1), 1)
         self.assertEqual(self.gh.by_label("instagram-vista-previa"), [])
         [err] = self.gh.by_label("instagram-error")
@@ -417,6 +419,68 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("Se realizó la audiencia pública; la decisión final la toma el Concejo en sesión.", audiencias)
         self.assertNotRegex(audiencias.lower(), r"aprob")
         self.assertNotIn("Real Maipú", caption)
+
+    def test_puesta_con_prensa_y_boletin(self):
+        import test_boletin
+        self.run_pub()
+        self.notes, self.boletin = test_boletin.PERIODO, test_boletin.store()
+        self.ig.recent = [{"id": "m1", "timestamp": "2026-06-01T12:00:00+0000", "caption": "Último post"}]
+        pub.puesta_preview({"1072"})
+        [issue] = self.gh.by_label("instagram-puesta-al-dia")
+        body, caption = issue["body"], self.state["puesta"]["caption"]
+        self.assertIn("![Placa 10]", body)
+        self.assertNotIn("![Placa 11]", body)
+        self.assertIn("Ordenanza 15.740/26", body)  # comodato de Cumbres: Prensa no lo publicó
+        self.assertNotIn("`ord-15710`", body.split("### Audiencias que ya")[0])  # EPET 30: ya está la nota 1531
+        # las audiencias del Obispado, la EPET 30 y Cumbres ya tienen ordenanza: salen de la placa de audiencias
+        audiencias = caption.split("Pasaron por audiencia pública:")[1].split("Deslizá")[0]
+        self.assertEqual(audiencias.count("• "), 5)
+        for numero, label in ((3, "15.741/26"), (5, "15.710/26"), (6, "15.740/26")):
+            self.assertIn(f"- N° {numero}: Ordenanza {label}", body)
+        # adjudicaciones a particulares: solo agregadas, sin lote, manzana ni nombres
+        self.assertIn("Se adjudicaron 7 lotes en Chacra 4 a familias", caption)
+        for dato in ("Lote", "Manzana", "PRUEBA", "11.111", "15.750", "15.712", "ord-15750"):  # ni el número de ordenanza
+            self.assertNotIn(dato, caption)
+            self.assertNotIn(dato, body)
+        # del Boletín solo temas de fondo o Bolsillo: ni obras puntuales ni la prórroga del presupuesto
+        for fuera in ("ord-15707", "ord-15718", "ord-15721", "ord-15738", "ord-15732"):
+            self.assertNotIn(fuera, self.state["puesta"]["notes"])
+        self.assertIn(ic.FUENTE_BO, caption)
+        self.assertIn("ord-15750", self.state["puesta"]["notes"])  # al publicarla, quedan vistas
+
+    def test_boletin_destacado_con_periodo_de_prueba(self):
+        import test_boletin
+        self.run_pub()
+        self.notes, self.boletin = test_boletin.PERIODO, test_boletin.store()
+        self.run_pub(1)  # primera corrida con el Boletín: lo ya publicado no sale
+        self.assertEqual(self.state["boletin_desde"], 826)
+        self.assertEqual(self.gh.by_label("instagram-vista-previa"), [])
+        self.state["boletin_desde"] = 820  # como si 821 y 826 hubieran salido después
+        self.hf[pub.STATE_PATH] = self.state
+        self.run_pub(2)
+        pending = self.state["pending"]
+        self.assertEqual(pending["destacado:ord-15740"]["kind"], "boletin")
+        self.assertIn("destacado:ord-15741", pending)  # donación al Obispado (transferencia de dominio)
+        self.assertNotIn("destacado:ord-15710", pending)  # EPET 30: duplicado de la nota 1531
+        self.assertIn("destacado:ord-15710", self.state["seen"])
+        self.assertFalse(any(k.startswith("destacado:ord-1575") for k in pending))  # adjudicaciones: nunca sueltas
+        body = next(i["body"] for i in self.gh.by_label("instagram-vista-previa") if "15.740/26" in i["body"])
+        self.assertIn("Boletín Oficial N° 826", body)
+        self.assertIn(f"0 de {pub.REVIEW_APPROVALS}", body)
+
+    def test_boletin_no_publica_si_nombra_a_un_particular(self):
+        import test_boletin
+        self.run_pub()
+        self.notes, self.boletin = test_boletin.PERIODO, test_boletin.store()
+        self.run_pub(1)
+        self.state["boletin_desde"] = 820
+        self.hf[pub.STATE_PATH] = self.state
+        malo = dict(CAMPOS, titular="Se adjudica a la Sra. Ana Prueba")
+        with mock.patch.object(ic, "destacado", lambda note, **kw: (dict(malo), None)):
+            self.run_pub(2)
+        self.assertEqual(self.gh.by_label("instagram-vista-previa"), [])
+        self.assertTrue(self.gh.by_label("instagram-error"))
+        self.assertNotIn("Ana Prueba", self.gh.all_text())
 
     def test_puesta_excluir_una_audiencia(self):
         import json
@@ -585,6 +649,19 @@ class PublisherTest(unittest.TestCase):
         titles = [i["title"] for i in self.gh.by_label("instagram-prueba")]
         self.assertEqual(titles, ["PRUEBA Instagram: Qué se aprobó · Sesión N° 23 (8 de octubre de 2026)",
                                   "PRUEBA Instagram: Destacado · Baja la tasa comercial"])
+        self.assertNotIn(pub.STATE_PATH, self.hf)
+        self.assertEqual(self.ig.published(), [])
+
+    def test_prueba_boletin(self):
+        import test_boletin
+        self.notes, self.boletin = test_boletin.PERIODO, test_boletin.store()
+        self.assertEqual(pub.run_preview("21", 2026, "boletin"), 0)
+        bodies = "\n".join(i["body"] for i in self.gh.by_label("instagram-prueba"))
+        self.assertIn("Ordenanza 15.740/26", bodies)  # comodato de Cumbres
+        self.assertIn("Ordenanza 15.741/26", bodies)  # lote para la Capilla Santa Teresita
+        self.assertNotIn("Gendarmería", bodies)       # reserva de estacionamiento: trámite puntual
+        pub.run_preview("18", 2026, "boletin")
+        self.assertIn("no saldría: es duplicado con la nota [1531]", self.gh.all_text())  # EPET 30
         self.assertNotIn(pub.STATE_PATH, self.hf)
         self.assertEqual(self.ig.published(), [])
 

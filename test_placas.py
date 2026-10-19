@@ -86,7 +86,8 @@ class SinSuperposicionTest(unittest.TestCase):
                 self.assertTrue(b in pie or b[3] <= 130, f"{nombre}: la marca {b} no está ni en el pie ni arriba")
             for b in pie:
                 self.assertEqual(b[3] - b[1], ic.MARK_H)
-            if any(re.search(r"\d+/\d+$", t) for _, t in textos):  # placa con pie (número de página)
+            # placa con pie (número de página abajo; "Ordenanza 15.740/26" en una portada no lo es)
+            if any(re.search(r"\d+/\d+$", t) and a[1] >= ic.CONTENT_BOTTOM for a, t in textos):
                 self.assertEqual(len(pie), 1, f"{nombre}: placa con pie sin marca")
 
     def test_orden_del_dia(self):
@@ -119,6 +120,10 @@ class SinSuperposicionTest(unittest.TestCase):
                 for tipo, c in campos.items():
                     self.verificar(f"destacado {key} nota {nota['id']}, {tipo}",
                                    lambda out: ic.render_destacado(sdoc, c, nota["impact_tags"], out))
+            for tipo, c in campos.items():  # del Boletín Oficial: número de ordenanza en la portada y arriba de la placa
+                self.verificar(f"destacado {key} ordenanza, {tipo}",
+                               lambda out: ic.render_destacado(sdoc, c, ["Tierras"], out,
+                                                               ordenanza={"label": "15.740/26", "boletin": 826}))
 
     def test_puesta_al_dia(self):
         from datetime import date
@@ -128,6 +133,10 @@ class SinSuperposicionTest(unittest.TestCase):
             items = [{"sdoc": prensa.session_doc(s), "titular": texto if tipo == "largo" else "El Concejo modificó la Tasa COM",
                       "line": texto, "impact_tags": ["Tierras"] + n["impact_tags"]} for n, s in notas]
             items[-1] = {"titular": "Servicios: 3 decisiones", "lines": [texto] * 3, "impact_tags": ["🚰 Servicios"]}
+            items[0]["ordenanza"] = {"label": "15.740/26", "boletin": 826}
+            items[1] = {"titular": "Se adjudicaron 6 lotes en Chacra 4 a familias", "impact_tags": ["Tierras"],
+                        "lines": [] if tipo != "largo" else [texto],
+                        "kicker": "TIERRAS · BOLETÍN OFICIAL", "ref": "Fuente: Boletín Oficial N° 821, 826"}
             auds = [{"line": texto if tipo == "largo" else "Comodato de la cancha Elías Sapag", "fecha": date(2026, 8, 10)}] * 8
             self.verificar(f"puesta al día, {tipo}",
                            lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out, audiencias=auds))

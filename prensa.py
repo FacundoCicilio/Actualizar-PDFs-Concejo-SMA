@@ -30,9 +30,11 @@ POLITICAL_TITLE_PAT = re.compile(r"juicio\s+pol[ií]tico|contra\s+el\s+intendent
 # Temas de fondo que van como destacado aunque no tengan etiqueta de Bolsillo/Servicios/Obras: (patrón sobre el título y
 # el comienzo sin tildes, peso para ordenar). Bolsillo pesa 5, Servicios y Obras 4 (ic.IMPACT_WEIGHT y OBRA_WEIGHT).
 THEMES = {
-    "Presupuesto": (re.compile(r"presupuesto|endeudamiento|prestamo|financiamiento"), 5),
-    "Tierras": (re.compile(r"\bcesion|comodato|donacion|\bventa de (?:un |una |los |las )?(?:lote|tierra|inmueble|parcela)"
-                           r"|adjudicacion|desafectacion|permuta|regularizacion dominial"), 4),
+    # "financiamiento" solo no: "el financiamiento de la obra" de un convenio de uso del gimnasio no es presupuesto
+    "Presupuesto": (re.compile(r"presupuesto|endeudamiento|prestamo|asistencia financiera"), 5),
+    # también los verbos de las ordenanzas del Boletín Oficial ("desaféctase", "cédese", "dónase")
+    "Tierras": (re.compile(r"\bcesion|\bcedese|comodato|donacion|\bdonase|\bventa de (?:un |una |los |las )?(?:lote|tierra|inmueble|parcela)"
+                           r"|adjudica|desafect|permuta|regularizacion dominial|transferencia de dominio"), 4),
     "Concesiones": (re.compile(r"concesion|licitacion|pliego"), 4),
     "Normas urbanas": (re.compile(r"codigo de edificacion|codigo urbano|zonificacion|ordenamiento territorial|factibilidad"), 3),
     "Tránsito": (re.compile(r"transporte|colectivo|\btaxi|remis|estacionamiento|reductor|lomos? de burro"), 3),
@@ -40,8 +42,12 @@ THEMES = {
 # "Contratación" sola no alcanza para Obras (la adhesión a una ley de capacitación habla de contratar profesionales).
 OBRA_PAT = re.compile(r"\bobras?\b|licitacion|pavimento|asfalto|cordon cuneta|red de agua|cloaca")
 OBRA_WEIGHT = 4
+PRORROGA_PAT = re.compile(r"prorroga[^.]{0,80}presupuesto")
+# Una reserva de estacionamiento frente a un edificio es un trámite puntual, no una regla de tránsito.
+RESERVA_PAT = re.compile(r"reserva de estacionamiento", re.I)
 # En las notas de tierras, lote/chacra/manzana/donación describen el bien, no un trámite de un particular.
-TIERRAS_INDIVIDUAL_OK = re.compile(r"lotes?\s+\d|manzana\s+\w|chacra\s+\d|a favor de|donaci[oó]n|regularizaci[oó]n dominial", re.I)
+TIERRAS_INDIVIDUAL_OK = re.compile(r"lotes?\s+\d|manzana\s+\w|chacra\s+\d|a favor de|donaci[oó]n|regularizaci[oó]n dominial"
+                                   r"|nomenclatura catastral", re.I)
 _MES = "|".join(MONTHS)
 # Fin de vigencia o de plazo: "hasta el 30 de septiembre de 2026", "del 1 al 30 de septiembre", "vence el 30 de …",
 # y solo con mes: "hasta diciembre de 2026", "de agosto a diciembre de 2026" (fin de ese mes).
@@ -139,7 +145,10 @@ def lead(note, chars=400):
 def themes(note):
     """Temas de fondo de la nota, el de mayor peso primero."""
     t = lead(note)
-    return sorted((name for name, (pat, _) in THEMES.items() if pat.search(t)), key=lambda k: -THEMES[k][1])
+    found = [name for name, (pat, _) in THEMES.items() if pat.search(t)]
+    if PRORROGA_PAT.search(t):  # prorrogar la presentación del presupuesto es un trámite, no una decisión sobre él
+        found = [name for name in found if name != "Presupuesto"]
+    return sorted(found, key=lambda k: -THEMES[k][1])
 
 
 def destacado_tags(note):
@@ -158,6 +167,8 @@ def weight(note):
 
 def general(note):
     """Alcance general: el de ic.is_relevant o un tema de fondo (en tierras, sin descartar por lote/chacra/donación)."""
+    if RESERVA_PAT.search(note["title"]):
+        return False
     if not themes(note):
         return ic.is_relevant(note)
     title = TIERRAS_INDIVIDUAL_OK.sub(" ", note["title"]) if "Tierras" in themes(note) else note["title"]

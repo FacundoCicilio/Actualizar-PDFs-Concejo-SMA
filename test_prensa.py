@@ -99,6 +99,13 @@ class CriterioDestacadoTest(unittest.TestCase):
         self.assertTrue(prensa.is_destacado(self.notas[1091]))  # reductores de velocidad
         self.assertEqual(prensa.themes(self.notas[1091]), ["Tránsito"])
 
+    def test_prorroga_del_presupuesto_es_un_tramite(self):
+        prorroga = {"title": "OTÓRGASE al Departamento Ejecutivo una prórroga para la presentación del Presupuesto de "
+                             "Gastos y Cálculo de Recursos 2027 hasta el 30 de noviembre de 2026", "text": ""}
+        self.assertEqual(prensa.themes(prorroga), [])  # Ordenanza 15.732/26
+        aprobado = {"title": "El Concejo aprobó el Presupuesto 2027", "text": ""}
+        self.assertEqual(prensa.themes(aprobado), ["Presupuesto"])
+
     def test_falsos_positivos_quedan_afuera(self):
         self.assertFalse(prensa.is_destacado(self.notas[1608]))  # "contratación" de profesionales no es una obra
         self.assertFalse(prensa.is_destacado(self.notas[1130]))  # el nombre de un puente es un homenaje
