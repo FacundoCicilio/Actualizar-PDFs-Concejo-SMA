@@ -220,6 +220,32 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(self.state["approved"], 1)
         self.assertEqual(self.state["published"]["nuevo"]["status"], "done")
 
+    def test_largo_del_texto(self):
+        pub.check_caption("x" * ic.CAPTION_MAX)
+        with self.assertRaisesRegex(pub.CaptionTooLong, "2201 caracteres y Instagram admite hasta 2200"):
+            pub.check_caption("x" * (ic.CAPTION_MAX + 1))
+        with self.assertRaises(pub.CaptionTooLong):  # un emoji cuenta 2, como en Instagram
+            pub.check_caption("👉" * (ic.CAPTION_MAX // 2 + 1))
+
+    def test_texto_largo_falla_antes_de_crear_contenedores(self):
+        with self.assertRaises(pub.CaptionTooLong):
+            pub.build_carousel(TOKEN, "17841", ["https://raw/a.jpg", "https://raw/b.jpg"], "x" * 2201)
+        self.assertEqual(self.ig.calls, [])
+
+    def test_puesta_con_texto_largo_avisa_al_generar_la_vista_previa(self):
+        self.run_pub()
+        self.puesta_notas()
+        subidas = []
+        with mock.patch.object(ic, "CAPTION_MAX", 100), \
+                mock.patch.object(pub, "upload_images", lambda paths, folder: subidas.append(folder) or []), \
+                mock.patch.object(pub.sys, "argv", ["instagram_publisher.py", "--puesta"]):
+            self.assertEqual(pub.main(), 1)
+        self.assertEqual(subidas, [])  # no se sube ninguna imagen
+        self.assertEqual(self.gh.by_label("instagram-puesta-al-dia"), [])
+        [error] = self.gh.by_label("instagram-error")
+        self.assertEqual(error["title"], "Instagram: el texto del post es demasiado largo")
+        self.assertIn("Instagram admite hasta 100", error["body"])
+
     def test_historia_despues_del_carrusel(self):
         self.run_pub()
         self.nueva_orden()
@@ -521,6 +547,11 @@ class PublisherTest(unittest.TestCase):
         for fuera in ("ord-15707", "ord-15718", "ord-15721", "ord-15738", "ord-15732"):
             self.assertNotIn(fuera, self.state["puesta"]["notes"])
         self.assertIn(ic.FUENTE_BO, caption)
+        # una línea por placa (sin las sublíneas de los grupos) y audiencias sin fecha: ~1.500 caracteres
+        self.assertLessEqual(ic.caption_len(caption), 1600)
+        self.assertNotIn("   – ", caption)
+        self.assertNotIn("(audiencia del", caption)
+        self.assertRegex(caption, r"\n• Tierras: \d+ decisiones\n")  # la placa agrupada, en una sola línea
         self.assertIn("ord-15750", self.state["puesta"]["notes"])  # al publicarla, quedan vistas
 
     def test_boletin_destacado_con_periodo_de_prueba(self):

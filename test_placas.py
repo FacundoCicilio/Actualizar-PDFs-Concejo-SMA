@@ -141,6 +141,21 @@ class SinSuperposicionTest(unittest.TestCase):
             self.verificar(f"puesta al día, {tipo}",
                            lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out, audiencias=auds))
 
+    def test_portada_de_la_puesta_cuenta_decisiones(self):
+        from datetime import date
+        sdoc = prensa.session_doc(prensa.sessions(NOTAS)["2026-O23"])
+        items = [{"sdoc": sdoc, "titular": "Una", "line": "x", "impact_tags": []},
+                 {"notes": [{"id": i} for i in range(6)], "titular": "Tierras: 6 decisiones", "lines": ["x"] * 6},
+                 {"notes": [{"id": i} for i in range(6)], "titular": "Se adjudicaron 7 lotes en Chacra 4 a familias",
+                  "lines": []}]  # adjudicaciones: 6 ordenanzas, sin líneas
+        self.assertEqual(ic.decisions(items), 13)
+        auds = [{"line": "Propuesta de comodato", "fecha": date(2026, 8, 10)}] * 5  # las audiencias no cuentan
+        with TextosDibujados() as reg, tempfile.TemporaryDirectory() as out:
+            ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out, audiencias=auds)
+        textos = [t for placa in reg.por_placa.values() for _, t in placa]
+        self.assertIn("13 decisiones  →", textos)
+        self.assertEqual(ic.decisions(items[:1]), 1)
+
     def test_historia(self):
         """1080x1920, marca y frase dentro de la zona segura, la frase debajo de la portada; los cuatro tipos."""
         from datetime import date

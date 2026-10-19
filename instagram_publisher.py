@@ -51,6 +51,7 @@ ERROR_TITLES = {
     "prensa": "Instagram: no se pudieron leer las notas de Prensa",
     "boletin": "Instagram: no se pudo leer el Boletín Oficial",
     "historia": "Instagram: falló la historia",
+    "texto": "Instagram: el texto del post es demasiado largo",
     "otro": "Instagram: error inesperado",
 }
 
@@ -61,6 +62,10 @@ class PublishError(Exception):
 
 class AnthropicFailure(PublishError):
     """Sin la API de Anthropic no hay texto para las placas de Prensa: no se publica y se reintenta mañana."""
+
+
+class CaptionTooLong(PublishError):
+    """El texto del post pasa el máximo de Instagram: se avisa antes de subir imágenes o crear contenedores."""
 
 
 class IGError(PublishError):
@@ -127,9 +132,18 @@ def upload_images(paths, folder):
     return urls
 
 
-def upload_with_story(paths, tmp, folder, text=ic.STORY_TEXT):
-    """Sube las placas y la historia (hecha con la portada): lo que se publica es lo que se revisó.
-    Devuelve (urls de las placas, url de la historia)."""
+def check_caption(caption):
+    """El texto del post entra en Instagram: si no, falla acá y no después de crear los contenedores."""
+    n = ic.caption_len(caption)
+    if n > ic.CAPTION_MAX:
+        raise CaptionTooLong(f"El texto del post tiene {n} caracteres y Instagram admite hasta {ic.CAPTION_MAX}: "
+                           f"no se generó la vista previa ni se publica nada. Hay que acortar el texto.")
+
+
+def upload_with_story(paths, tmp, folder, caption, text=ic.STORY_TEXT):
+    """Controla el largo del texto y sube las placas y la historia (hecha con la portada): lo que se publica es lo
+    que se revisó. Devuelve (urls de las placas, url de la historia)."""
+    check_caption(caption)
     urls = upload_images(paths + [ic.render_story(paths[0], Path(tmp) / "historia.jpg", text)], folder)
     return urls[:-1], urls[-1]
 
@@ -198,6 +212,7 @@ def build_carousel(token, user_id, image_urls, caption):
     """Crea y verifica todos los contenedores. Si falla cualquiera, se lanza el error y no se publica nada."""
     if not 2 <= len(image_urls) <= 10:
         raise PublishError(f"Un carrusel necesita entre 2 y 10 imágenes; hay {len(image_urls)}.")
+    check_caption(caption)
     children = []
     for u in image_urls:
         cid = ig("POST", f"{user_id}/media", token, image_url=u, is_carousel_item="true")["id"]
@@ -301,7 +316,7 @@ def prepare(doc_id, folder):
     with tempfile.TemporaryDirectory() as tmp:
         paths = ic.render_carousel(doc, tmp, prefix="placa", simple_lines=lines, ext="jpg")
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
-        urls, story = upload_with_story(paths, tmp, folder)
+        urls, story = upload_with_story(paths, tmp, folder, caption)
     return doc, urls, caption, story
 
 
@@ -320,7 +335,7 @@ def prepare_aprobado(s, folder):
     with tempfile.TemporaryDirectory() as tmp:
         paths = ic.render_aprobado(sdoc, picked, tmp, ext="jpg")
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
-        urls, story = upload_with_story(paths, tmp, folder)
+        urls, story = upload_with_story(paths, tmp, folder, caption)
     return label, urls, caption, None, story
 
 
@@ -339,7 +354,7 @@ def prepare_destacado(s, note, folder):
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
         if ordenanza and boletin.leaks(caption):
             raise PublishError(f"El destacado de la Ordenanza {ordenanza['label']} nombraba a un particular: no se publica.")
-        urls, story = upload_with_story(paths, tmp, folder)
+        urls, story = upload_with_story(paths, tmp, folder, caption)
     end = prensa.vigencia_hasta(note)
     return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat(), story
 
@@ -966,7 +981,8 @@ def puesta_preview(excluir):
         shown = "\n".join([caption] + [it.get("line", "") for it in items] + [x for it in items for x in it.get("lines", [])])
         if boletin.leaks(shown):
             raise PublishError("La puesta al día nombraba a un particular: no se generó. Revisá las ordenanzas del período.")
-        urls, story = upload_with_story(paths, tmp, f"puesta-{now():%Y%m%d%H%M%S}", ic.story_text_puesta(start, today))
+        urls, story = upload_with_story(paths, tmp, f"puesta-{now():%Y%m%d%H%M%S}", caption,
+                                         ic.story_text_puesta(start, today))
     old = state.get("puesta")
     number, url = create_issue(f"Vista previa Instagram: Puesta al día desde {ic.month_since(start, today)}",
                                preview_body(urls, caption, head=head, story=story), ["instagram-puesta-al-dia"])
@@ -1019,7 +1035,7 @@ def main():
             return puesta_preview({x.strip() for x in args.excluir.split(",") if x.strip()})
         return run_preview(args.prueba, args.anio, args.tipo) if args.prueba else run()
     except PublishError as e:
-        report_error("otro", str(e))
+        report_error("texto" if isinstance(e, CaptionTooLong) else "otro", str(e))
         return 1
     except Exception as e:  # cualquier otra falla también abre un Issue (las de red ya llegan sin URLs ni tokens)
         traceback.print_exc()

@@ -30,6 +30,12 @@ DESTACADO = ("#8A4B0F", "#F1DCC4")
 PUESTA = ("#4B2E6F", "#DCD0EA")
 FUENTE = "Fuente: Prensa del Concejo Deliberante (prensacd.cdsma.gob.ar)"
 FUENTE_BO = "Fuente: Boletín Oficial Municipal (boletinoficial.sma.gob.ar)"
+CAPTION_MAX = 2200  # Instagram rechaza el contenedor con "The caption was too long" (pasó con la puesta al día)
+
+
+def caption_len(caption):
+    """Largo como lo cuenta Instagram, del lado seguro: en UTF-16 (un emoji ocupa 2)."""
+    return len(caption.encode("utf-16-le")) // 2
 
 # Peso de cada impacto para ordenar los ítems: primero lo que toca el bolsillo y los servicios.
 IMPACT_WEIGHT = {
@@ -819,6 +825,7 @@ def month_since(start, today):
 
 
 def puesta_cover(start, today, n):
+    """n: cantidad de decisiones (decisions), no de placas."""
     accent, soft = PUESTA
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
@@ -831,7 +838,7 @@ def puesta_cover(start, today, n):
     d.line((M, y, M + 140, y), fill=soft, width=6)
     f, ls, lh = fit_text(d, "Concejo Deliberante de San Martín de los Andes", W - 2 * M, 110, sizes=(40,))
     draw_lines(d, (M, y + 50), ls, f, lh, soft)
-    d.text((M, H - 150), f"{n} tema{'s' if n != 1 else ''} destacado{'s' if n != 1 else ''}  →", font=font(40, True), fill="white")
+    d.text((M, H - 150), f"{n} decisi{'ones' if n != 1 else 'ón'}  →", font=font(40, True), fill="white")
     return img
 
 
@@ -917,16 +924,22 @@ def audiencias_slide(auds, page, total):
     return content_slide("PUESTA AL DÍA", "", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
 
 
+def decisions(items):
+    """Cantidad de decisiones de la puesta al día: cada una de una placa agrupada cuenta (las audiencias, no)."""
+    return sum(len(it.get("notes") or it.get("lines") or [None]) if "lines" in it else 1 for it in items)
+
+
 def puesta_caption(start, today, items, auds=()):
+    """Una línea por placa (el detalle de las agrupadas está en la placa): Instagram corta en CAPTION_MAX."""
     lines = [f"🗓️ Puesta al día: lo más importante que aprobó el Concejo desde {month_since(start, today)}", ""]
     for it in items:
         if "lines" in it:
-            lines += [f"• {it['titular']}{':' if it['lines'] else ''}"] + [f"   – {line}" for line in it["lines"]]
+            lines.append(f"• {it['titular']}")
         else:
             ord_txt = f", Ordenanza {it['ordenanza']['label']}" if it.get("ordenanza") else ""
-            lines.append(f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])}{ord_txt})")
+            lines.append(f"• {it['titular']} ({session_title(it['sdoc'])}{ord_txt})")
     if auds:
-        lines += ["", f"{AUDIENCIA_TITLE}:"] + [f"• {a['line']} (audiencia del {a['fecha']:%d/%m})" for a in auds]
+        lines += ["", f"{AUDIENCIA_TITLE}:"] + [f"• {a['line']}" for a in auds]
         lines += [AUDIENCIA_NOTE]
     boletin = any(it.get("ordenanza") or "Boletín" in (it.get("ref") or "") for it in items)
     lines += ["", "Deslizá para ver el detalle 👉", FUENTE] + ([FUENTE_BO] if boletin else [])
@@ -939,7 +952,7 @@ def render_puesta(start, today, items, out_dir, prefix="puesta", ext="png", audi
     10 imágenes: la placa de audiencias nunca se recorta; se recortan los destacados de menor peso."""
     items = items[:MAX_ITEMS - (1 if audiencias else 0)]
     total = len(items) + (1 if audiencias else 0) + 2
-    slides = [puesta_cover(start, today, len(items))]
+    slides = [puesta_cover(start, today, decisions(items))]
     slides += [puesta_slide(it, i, len(items), i + 1, total) for i, it in enumerate(items, start=1)]
     if audiencias:
         slides.append(audiencias_slide(audiencias, len(items) + 2, total))
