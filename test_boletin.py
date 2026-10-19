@@ -20,7 +20,8 @@ def store():
     ords = {}
     for n, t in TEXTO.items():
         ords.update({str(o["numero"]): o for o in boletin.parse(t, n, URL.format(n))})
-    return {"boletines": {str(n): {"url": URL.format(n), "size": 1, "sha256": "x"} for n in TEXTO}, "ordenanzas": ords}
+    return {"boletines": {str(n): {"url": URL.format(n), "size": 1, "sha256": "x"} for n in TEXTO}, "ordenanzas": ords,
+            "version": boletin.STORE_VERSION}
 
 
 def notas(st):
@@ -78,6 +79,14 @@ class DeteccionTest(unittest.TestCase):
             st, _ = self.run_load(st, {URL.format(826): b"826", nuevo: b"827"})
         self.assertEqual(st["boletines"]["827"]["url"], nuevo)
         self.assertEqual(st["ordenanzas"]["15710"]["boletin"], 827)
+
+    def test_version_vieja_se_reprocesa_todo(self):
+        st = store()
+        del st["version"]  # guardado con la regla anterior (las de particulares, sin texto)
+        st["boletines"] = {"826": {"url": URL.format(826), "size": 3, "sha256": "x"}}
+        st, guardados = self.run_load(st, {URL.format(826): b"826"})
+        self.assertEqual(len(guardados), 1)
+        self.assertEqual(guardados[0]["version"], boletin.STORE_VERSION)
 
     def test_pdf_reemplazado_con_el_mismo_nombre_se_reprocesa(self):
         st = {"boletines": {"826": {"url": URL.format(826), "size": 3, "sha256": "viejo"}}, "ordenanzas": {}}
@@ -165,6 +174,94 @@ class DuplicadosTest(unittest.TestCase):
         for nota_id, label in [("1119", "15.741/26"), ("1172", "15.710/26"), ("1179", "15.740/26"), ("1334", None)]:
             o = boletin.decided(por_id[nota_id]["notes"], ords)
             self.assertEqual(o and o["ordenanza"]["label"], label, nota_id)  # Obispado, EPET 30, Cumbres; Don Márquez no
+
+
+class NivelesDePrivacidadTest(unittest.TestCase):
+    """Ordenanzas que nombran personas (nombres y documentos ficticios): rol público, actividad privada autorizada o
+    privada. Nunca quedan DNI, CUIL ni domicilio en lo que se guarda o se muestra."""
+    HEAD = "ORDENANZA Nº 15.900/2026 PROMULGADA POR DECRETO Nº 2700/26 DE FECHA 20/10/2026\n"
+    FIN = " ARTÍCULO 2º.- Comuníquese al Departamento Ejecutivo Municipal.-"
+    CASOS = {
+        "contratacion": ("ARTÍCULO 1º.- AUTORÍZASE la contratación directa del Agrim. Rodolfo Ficticio Lanús, DNI N° 20.111.222, "
+                         "con domicilio en calle Inventada 123, para la mensura del Lote 4 por $ 1.500.000.-"),
+        "locacion": ("ARTÍCULO 1º.- APRUÉBASE la locación de servicio con la Lic. Marta Imaginaria, CUIL 27-30111222-4, "
+                     "domiciliada en Barrio Falso, para la capacitación del personal municipal.-"),
+        "licencia": ("ARTÍCULO 1º.- AUTORÍZASE a otorgar una licencia comercial a término a favor del Sr. Pedro INVENTO, "
+                     "DNI 30.444.555, con domicilio real en calle Ficticia 9, para el rubro “kiosco”.-"),
+        "carrito": ("ARTÍCULO 1º.- AUTORÍZASE la anexión del rubro “helados” al carrito cuya titular es Ana SUPUESTA, "
+                    "DNI 31.555.666, en la Plaza Sarmiento.-"),
+        "adjudicacion": ("ARTÍCULO 1º.- ADJUDÍCASE a la Sra. Laura NOEXISTE, DNI 32.666.777, el Lote Z-9 de la Chacra 4.-"),
+        "mixto": ("ARTÍCULO 1º.- AUTORÍZASE la licencia comercial a favor del Sr. Mario FALSO, DNI 33.777.888, en el inmueble "
+                  "propiedad de la Sra. Rosa FALSA, para el rubro “almacén”.-"),
+        "sin categoria": ("ARTÍCULO 1º.- AUTORÍZASE la colocación de un cartel solicitado por el Sr. Juan NADIE, DNI 34.888.999, "
+                          "en la plaza del barrio.-"),
+    }
+    DATOS = ("20.111.222", "30111222", "30.444.555", "31.555.666", "32.666.777", "33.777.888", "34.888.999",
+             "Inventada 123", "Barrio Falso", "Ficticia 9", "domicili")
+
+    def parse(self, caso):
+        [o] = boletin.parse(self.HEAD + self.CASOS[caso] + self.FIN, 827, "u")
+        return o
+
+    def sin_datos(self, o):
+        guardado = json.dumps(o, ensure_ascii=False)
+        for dato in self.DATOS:
+            self.assertNotIn(dato, guardado)
+
+    def test_rol_publico_con_nombre(self):
+        for caso, nombre in (("contratacion", "Rodolfo Ficticio Lanús"), ("locacion", "Marta Imaginaria")):
+            o = self.parse(caso)
+            self.assertEqual(o.get("nivel"), "publico", caso)
+            self.assertIn(nombre, o["text"])                       # el buscador lo muestra
+            self.assertNotIn(nombre.split()[-1], o["text_ig"])     # Instagram, nunca
+            self.assertIn("un profesional", o["text_ig"])  # "contratación directa de un profesional"
+            self.assertEqual(boletin.as_note(o)["text"], o["text_ig"])
+            self.sin_datos(o)
+
+    def test_actividad_privada_autorizada_sin_nombre(self):
+        for caso, apellido in (("licencia", "INVENTO"), ("carrito", "SUPUESTA")):
+            o = self.parse(caso)
+            self.assertEqual(o.get("nivel"), "actividad", caso)
+            self.assertNotIn(apellido, o["text"])
+            self.assertIn("un particular", o["text"])
+            self.assertIn("rubro", o["text"])  # el texto se ve
+            self.sin_datos(o)
+
+    def test_privada_solo_numero_y_fecha(self):
+        o = self.parse("adjudicacion")
+        self.assertTrue(o["particular"])
+        self.assertNotIn("text", o)
+        self.sin_datos(o)
+
+    def test_mixto_gana_la_mas_restrictiva(self):  # licencia comercial (actividad) en un inmueble de un particular (privada)
+        o = self.parse("mixto")
+        self.assertTrue(o["particular"])
+        self.assertNotIn("text", o)
+        self.sin_datos(o)
+
+    def test_sin_categoria_es_privada(self):
+        o = self.parse("sin categoria")
+        self.assertTrue(o["particular"])
+        self.assertNotIn("text", o)
+
+    def test_sin_personas_no_cambia(self):
+        o = boletin.parse(self.HEAD + "ARTÍCULO 1º.- APRUÉBASE el pliego de la obra de pavimentación." + self.FIN, 827, "u")[0]
+        self.assertNotIn("nivel", o)
+        self.assertNotIn("particular", o)
+        self.assertIn("pavimentación", o["text"])
+
+    def test_buscador(self):
+        import buscador
+        st = {"ordenanzas": {c: {**self.parse(c), "numero": 15900 + i, "label": f"15.{900 + i}/26"}
+                             for i, c in enumerate(("contratacion", "licencia", "adjudicacion"))}}
+        recs = {r["ordenanza"]: r for r in buscador.boletin_records(st)}
+        self.assertIn("rodolfo ficticio lanus", recs["15.900/26"]["search_blob"])  # rol público: nombre buscable
+        self.assertTrue(buscador.search_records(buscador.boletin_records(st), "Lanus"))
+        self.assertFalse(buscador.search_records(buscador.boletin_records(st), "INVENTO"))  # actividad: sin nombre
+        self.assertFalse(buscador.search_records(buscador.boletin_records(st), "NOEXISTE"))  # privada
+        for r in recs.values():
+            for dato in self.DATOS:
+                self.assertNotIn(buscador.normalize_text(dato), r["search_blob"])
 
 
 class AnonimizacionTest(unittest.TestCase):

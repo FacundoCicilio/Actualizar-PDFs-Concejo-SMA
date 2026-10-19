@@ -16,6 +16,7 @@ from hf_dataset_store import DATASET_REPO_ID, load_json, save_json
 
 BASE = "http://boletinoficial.sma.gob.ar"
 STORE_PATH = "boletin/boletines.json"
+STORE_VERSION = 2  # 2: tres niveles de privacidad (público / actividad / privada)
 RECHECK = 3  # los últimos boletines guardados se revisan por si los reemplazaron con el mismo nombre
 
 LINK_PAT = re.compile(r"""href=["'](https?://boletinoficial\.sma\.gob\.ar/wp-content/uploads/\d{4}/\d{2}/bom-(\d{3,4})[^"'/]*\.pdf)["']""", re.I)
@@ -31,7 +32,8 @@ SESSION_TEXT_PAT = re.compile(rf"Sesi[oó]n\s+(Ordinaria|Especial)\s+N[º°o]?\s
 END_PAT = re.compile(r"^\s*(?:ANEXO\b|RESUMEN AUDIENCIA|DECRETOS?\s*$|RESOLUCI[OÓ]N(?:ES)?\s+N[º°])", re.M | re.I)
 LAST_ARTICLE_PAT = re.compile(r"Comun[ií]quese al Departamento Ejecutivo Municipal\.?-?", re.I)
 ARTICLE1_PAT = re.compile(r"ART[ÍI]CULO\s*1\s*[º°]?\s*\.?\s*-?\s*(.+?)(?=ART[ÍI]CULO\s*2\b|$)", re.I | re.S)
-DNI_PAT = re.compile(r"\b(?:D\.?\s*N\.?\s*I\.?|L\.?E\.?|L\.?C\.?)\s*:?\s*(?:N[º°o]\.?\s*)?[A-Z]?[\d.,\s]{6,12}\d", re.I)
+# "DNI" sin borde de palabra adelante (también "particularDNI 12.345.678"); L.E. y L.C., con borde: son cortos
+DNI_PAT = re.compile(r"(?:D\.?\s*N\.?\s*I\.?|\b(?:L\.?E\.?|L\.?C\.?))\s*:?\s*(?:N[º°o]\.?\s*)?[A-Z]?[\d.,\s]{6,12}\d", re.I)
 # CUIT/CUIL: 20, 23, 24 y 27 son personas; 30, 33 y 34, empresas e instituciones (esas no hacen particular a la norma).
 CUIT_PAT = re.compile(r"\bC\.?U\.?I\.?[TL]\.?\s*:?\s*(?:N[º°o]\.?\s*)?(\d{2})\s*-?\s*[\d.]{7,10}\s*-?\s*\d", re.I)
 PERSON_CUIT = {"20", "23", "24", "27"}
@@ -78,8 +80,66 @@ def _session(number, kind, d):
             "date": d.isoformat()}
 
 
+# ------------------------------------------------------------------ privacidad: tres niveles para las que nombran personas
+# Si coincide más de uno, gana el más restrictivo (PRIVADA > ACTIVIDAD > PÚBLICO); si ninguno, PRIVADA.
+PRIVADA_PAT = re.compile(
+    r"adjud[ií]c|usufructo|v[eé]ndese|venta\s+(?:de\s+)?(?:un\s+|una\s+|el\s+|la\s+|los\s+)?(?:lote|vivienda|inmueble|terreno)"
+    r"|boleto\s+de\s+compraventa|escritur|regulariza|exim|exenci|cond[oó]n|subsidio|pensi[oó]n|\bbeca|distinci"
+    r"|ciudadan[oa]\s+ilustre|vecin[oa]\s+(?:ilustre|destacad)|subdivi|propiedad\s+horizontal"
+    r"|propiedad\s+de\s+(?!la\s+Municipalidad|la\s+Provincia|el\s+Estado|el\s+Municipio)", re.I)
+ACTIVIDAD_PAT = re.compile(r"licencia\s+comercial|habilita|anexi[oó]n\s+del?\s+rubro|\brubros?\b|carrito|food\s*truck"
+                           r"|venta\s+(?:de\s+)?(?:alcohol|bebidas|entradas)|venta\s+ambulante|permiso\s+de\s+venta", re.I)
+PUBLICO_PAT = re.compile(r"contrataci[oó]n(?:es)?\s+directas?|contr[aá]tase|locaci[oó]n\s+de\s+(?:obra|servicio)|honorario"
+                         r"|reconoc\w*\s+(?:de\s+)?(?:la\s+)?deuda|leg[ií]timo\s+abono|ab[oó]nese|p[aá]guese|proveedor"
+                         r"|estudio\s+de\s+impacto|concesi[oó]n|integrantes\s+de\s+la\s+comisi[oó]n|comisi[oó]n\s+municipal", re.I)
+DOMICILIO_PAT = re.compile(r",?\s*(?:con\s+)?domicili\w*\s+(?:real\s+|legal\s+|fiscal\s+)?(?:en\s+)?[^,.;]{0,90}", re.I)
+_NAME = r"(?:[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ'’-]*\.?\s+){0,5}[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ'’-]+"
+_ART = r"(?P<art>\b(?:del|de la|al|a la|el|la)\s+)?"
+# Nombre seguido de su documento ("Juan PÉREZ, DNI …"; CUIT/CUIL de persona: 20, 23, 24, 27)
+NAME_ID_PAT = re.compile(_ART + r"(?:(?:Sr|Sra|Srta)\.?\s+)?" + _NAME
+                         + r",?\s*(?=(?:D\.?\s*N\.?\s*I|L\.?E\.?\s|L\.?C\.?\s|C\.?U\.?I\.?[TL]\.?\s*:?\s*(?:N[º°o]\.?\s*)?(?:20|23|24|27)))")
+# Profesionales con título abreviado, aunque traigan más de una abreviatura ("Ing. Ftal. Juan Pérez")
+PROF_PAT = re.compile(_ART + r"(?:Ing|Arq|Lic|Dr|Dra|Prof|Cdor|Cdora|Agrim|Mg|MMO|Tec|T[ée]c)\.(?:\s*[A-Z][a-z]{1,5}\.)*\s+" + _NAME)
+# Nombre después de un rol de particular ("a favor de Juan Pérez", "representado por Ana Gómez")
+ROLE_NAME_PAT = re.compile(r"(?P<role>a\s+favor\s+del?|representad[oa]\s+por|solicitante|titular|propietari[oa])\s+(?:el\s+|la\s+)?"
+                           r"(?:(?:Sr|Sra|Srta)\.?\s+)?(?![a-z])" + _NAME)
+
+
+def _particular(m):
+    art = (m.groupdict().get("art") or "").strip().lower()
+    # el separador queda: si no, "un particularDNI …" escapa a DNI_PAT (no hay borde de palabra) y el DNI no se borra
+    return {"del": "de ", "de la": "de ", "al": "a ", "a la": "a "}.get(art, "") + "un particular" + (
+        ", " if m.group(0).rstrip() != m.group(0) or m.group(0).endswith(",") else "")
+
+
+def strip_ids(text):
+    """Sin DNI, CUIL/CUIT ni domicilio (los nombres quedan): lo que se muestra de una ordenanza de rol público."""
+    text = re.sub(r"\s+", " ", DOMICILIO_PAT.sub("", CUIT_PAT.sub("", DNI_PAT.sub("", text))))
+    return re.sub(r"\s*,(?:\s*,)+", ",", text).strip()  # "un particular, , para" -> "un particular, para"
+
+
+def depersonalize(text):
+    """Sin nombres de personas físicas ("un particular") ni documentos ni domicilio. Las empresas (S.A., S.R.L.) quedan."""
+    text = PROF_PAT.sub(lambda m: _particular(m).replace("particular", "profesional"), text)  # antes: NAME_ID se come el título
+    text = NAME_ID_PAT.sub(_particular, text)
+    text = ROLE_NAME_PAT.sub(lambda m: f"{m.group('role')} un particular", text)
+    text = re.sub(r"\bun[a]? vecin[oa]\b", "un particular", ic.anonymize(text))
+    return strip_ids(text)
+
+
+def privacy_level(body):
+    """None si no nombra personas; si no, "privada", "actividad" o "publico" (ver los patrones)."""
+    if not leaks(body):
+        return None
+    if PRIVADA_PAT.search(body):
+        return "privada"
+    if ACTIVIDAD_PAT.search(body):
+        return "actividad"
+    return "publico" if PUBLICO_PAT.search(body) else "privada"
+
+
 def scrub(text):
-    """Sin documentos de identidad ni nombres de particulares (lo que ya hace la anonimización de las notas)."""
+    """Texto de una ordenanza que no nombra personas: sin documentos (p. ej. CUIT de empresas)."""
     return re.sub(r"\s+", " ", ic.anonymize(CUIT_PAT.sub("", DNI_PAT.sub("", text)))).strip()
 
 
@@ -119,11 +179,19 @@ def parse(text, numero, url):
             if d:
                 o["session"] = _session(s.group(2), s.group(1).capitalize(), d)
         o["a_revisar"] = o["session"] is None  # sin sesión no se publica: queda listada en la vista previa
-        if is_particular(body):
+        level = privacy_level(body)
+        anon = depersonalize(body) if level in ("actividad", "publico") else ""
+        if level in ("actividad", "publico") and leaks(anon):
+            level = "privada"  # no se pudo sacar el nombre con seguridad: se oculta
+        if level == "privada":
             o["particular"] = True
             if ADJ_PAT.search(body) and CHACRA_PAT.search(body):
                 o["adjudicacion"] = {"chacra": CHACRA_PAT.search(body).group(1),
                                      "lotes": max(1, len(set(LOTE_PAT.findall(body))))}
+        elif level == "actividad":
+            o["nivel"], o["text"] = level, anon
+        elif level == "publico":  # el buscador muestra el nombre; Instagram usa text_ig, sin nombres de personas
+            o["nivel"], o["text"], o["text_ig"] = level, strip_ids(body), anon
         else:
             o["text"] = scrub(body)
         out.append(o)
@@ -139,6 +207,8 @@ def load(today, save=True):
     """Boletines y ordenanzas guardados más los nuevos del sitio. Lanza requests.RequestException si el sitio falla.
     Devuelve {"boletines": {n: {url, size, sha256}}, "ordenanzas": {numero: ordenanza}}."""
     store = load_json(DATASET_REPO_ID, STORE_PATH) or {"boletines": {}, "ordenanzas": {}}
+    if store.get("version") != STORE_VERSION:  # cambió cómo se extrae (p. ej. la regla de privacidad): se rehace todo
+        store["boletines"] = {k: {**b, "sha256": None} for k, b in store["boletines"].items()}
     r = _get(BASE + "/")
     r.raise_for_status()
     found = discover(r.text)
@@ -150,6 +220,7 @@ def load(today, save=True):
                 found[last + 1] = url
                 break
     todo = {n: u for n, u in found.items() if n not in known}
+    todo.update({int(k): b["url"] for k, b in store["boletines"].items() if b.get("sha256") is None})
     for n in sorted(known)[-RECHECK:]:  # reemplazado con el mismo nombre: cambia el tamaño
         b = store["boletines"][str(n)]
         h = _get(b["url"], "HEAD")
@@ -166,6 +237,8 @@ def load(today, save=True):
             store["ordenanzas"][str(o["numero"])] = o
         store["boletines"][str(n)] = {"url": url, "size": len(resp.content), "sha256": sha}
         changed = True
+    changed = changed or store.get("version") != STORE_VERSION
+    store["version"] = STORE_VERSION
     if changed and save:
         save_json(DATASET_REPO_ID, STORE_PATH, store, f"Boletín Oficial: {len(todo)} boletines nuevos o reemplazados")
     return store
@@ -173,10 +246,12 @@ def load(today, save=True):
 
 # ------------------------------------------------------------------ como notas de Prensa (mismo criterio de destacado)
 def as_note(o):
-    """La ordenanza con la forma de una nota de Prensa, para usar prensa.themes, is_destacado, rank y las placas."""
-    m = ARTICLE1_PAT.search(o["text"])
+    """La ordenanza con la forma de una nota de Prensa, para usar prensa.themes, is_destacado, rank y las placas.
+    Es lo que llega a Instagram: de las de rol público, el texto sin nombres de personas (text_ig)."""
+    text = o.get("text_ig") or o["text"]
+    m = ARTICLE1_PAT.search(text)
     note = {"id": f"ord-{o['numero']}", "date": o["promulgada"], "link": o["url"],
-            "title": ic.shorten((m.group(1) if m else o["text"]).strip(" .-"), 300), "text": o["text"],
+            "title": ic.shorten((m.group(1) if m else text).strip(" .-"), 300), "text": text,
             "ordenanza": {"label": o["label"], "boletin": o["boletin"]}}
     note["impact_tags"] = prensa.impact_tags(note)
     return note
