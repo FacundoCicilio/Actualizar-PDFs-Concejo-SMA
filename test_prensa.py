@@ -70,7 +70,12 @@ class SesionTest(unittest.TestCase):
         self.assertFalse({1818, 1815, 1857, 1758} & destacados)  # distinciones y declaraciones de interés
 
     def test_educacion(self):
-        self.assertIn("📚 Educación", prensa.impact_tags(NOTAS["1758"]))  # robótica de las EPET 12 y 30
+        self.assertIn("📚 Educación", prensa.impact_tags(NOTAS["1531"]))  # cesión de tierras para la EPET N°30
+
+    def test_reconocimientos_quedan_solo_en_cultura(self):
+        # nombran escuelas de paso ("cooperadoras escolares", "estudiantes de la EPET"), pero no cambian nada en ellas
+        for note_id in (1818, 1758, 1787):  # distinción a CIMAS, Embajadores Educativos, interés municipal Legado ECO (EPET 21)
+            self.assertEqual(prensa.impact_tags(NOTAS[str(note_id)]), ["🎭 Cultura/Eventos"], NOTAS[str(note_id)]["title"])
 
     def test_texto_para_claude_anonimizado(self):
         texto = prensa.note_text({"title": "Pedido", "text": "Solicitud del Sr. David Figueroa de baja"})
@@ -106,7 +111,7 @@ class ClaudeNotasTest(unittest.TestCase):
             self.assertEqual(ic.note_line(self.nota), "El Concejo aprobó bajar un 35% la tasa comercial hasta fin de año.")
 
     def test_destacado_no_inventa(self):
-        datos = {"titular": "Baja la tasa comercial", "que_cambia": "La tasa comercial baja un 35%.",
+        datos = {"titular": "El Concejo modificó la Tasa COM y la tasa ENSATUR", "que_cambia": "La tasa comercial baja un 35%.",
                  "a_quien_afecta": "Comercios del Sr. Juan Pérez", "desde_cuando": "Desde marzo de 2031."}
         patch, create = self.cliente(json.dumps(datos))
         with patch:
@@ -115,6 +120,28 @@ class ClaudeNotasTest(unittest.TestCase):
         self.assertEqual(campos["a_quien_afecta"], "Comercios de un vecino")
         self.assertEqual(campos["desde_cuando"], "")  # 2031 no está en la nota: "la nota no lo informa"
         self.assertEqual(create.call_args.kwargs["output_config"]["format"]["type"], "json_schema")
+
+    def test_titular_valorativo_o_solo_una_baja_se_descarta(self):
+        # la nota baja la Tasa COM y duplica la ENSATUR
+        for titular in ("Alivio fiscal para los comercios", "Un beneficio para el turismo", "Golpe a los comercios",
+                        "Baja la tasa comercial", "El Concejo duplicó la tasa ENSATUR"):
+            patch, create = self.cliente(json.dumps({"titular": titular, "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}))
+            with patch, mock.patch("builtins.print"):
+                self.assertIsNone(ic.destacado_fields(self.nota), titular)
+            self.assertEqual(create.call_count, 2)  # se pide otro titular antes de descartar
+        for titular in ("El Concejo modificó la Tasa COM y la tasa ENSATUR para comercios",
+                        "Baja la Tasa COM y se duplica la tasa ENSATUR"):
+            self.assertTrue(ic.titular_ok(titular, self.nota), titular)
+        self.assertTrue(ic.titular_ok("Baja la tasa de habilitación", "El Concejo aprobó reducir un 10% la tasa."))
+        # "beneficiarios" describe a quién alcanza, no califica la medida
+        self.assertTrue(ic.titular_ok("Exención del 70% para beneficiarios de Neuquén Habita", "exime del 70%"))
+
+    def test_segundo_intento_con_titular_neutral(self):
+        malo = {"titular": "Alivio fiscal para comercios", "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}
+        bueno = {**malo, "titular": "El Concejo modificó la Tasa COM y la tasa ENSATUR"}
+        create = mock.Mock(side_effect=[respuesta(json.dumps(malo)), respuesta(json.dumps(bueno))])
+        with mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=create))), mock.patch("builtins.print"):
+            self.assertEqual(ic.destacado_fields(self.nota)["titular"], bueno["titular"])
 
     def test_destacado_sin_titular_no_sale(self):
         patch, _ = self.cliente(json.dumps({"titular": "", "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}))

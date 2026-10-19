@@ -549,8 +549,17 @@ DESTACADO_SYSTEM = (
     "de prensa. Completá: titular (hasta 10 palabras), que_cambia, a_quien_afecta y desde_cuando (una oración corta "
     "cada uno), en español rioplatense simple y con tus palabras, sin copiar frases de la nota. Usá SOLO datos que "
     "estén en la nota (montos, porcentajes, plazos, alcance). Si la nota no informa alguno de los tres, dejalo vacío "
-    "(\"\"): nunca lo deduzcas ni lo inventes. No nombres a personas particulares. Sin emojis."
+    "(\"\"): nunca lo deduzcas ni lo inventes. No nombres a personas particulares. Sin emojis. "
+    "El titular es descriptivo y neutral: dice qué se modificó, sin calificar la medida (nada de 'alivio', "
+    "'beneficio', 'golpe', 'ayuda' ni 'mejora'). Si la nota tiene medidas que bajan y otras que suben lo que se paga, "
+    "el titular no la presenta como solo una baja ni como solo una suba: nombra lo que se modificó. Ejemplo: "
+    "'El Concejo modificó la Tasa COM y la tasa ENSATUR para comercios'."
 )
+# Controles del titular: el prompt lo pide, pero si Haiku igual califica o simplifica, el titular se descarta.
+VALORATIVE_PAT = re.compile(r"\b(?:alivi\w*|benefici(?!ari)\w*|golpe\w*|ayud\w*|mejor[ae]s?|perjudic\w*|perjuicio\w*|castig\w*"
+                            r"|tarifazo\w*|premi\w*|logr\w*|hist[oó]ric\w*|important\w*|impuls\w*|favorec\w*)\b", re.I)
+DOWN_PAT = re.compile(r"\b(?:baja|bajan|bajar\w*|baj[oó]|reduc\w*|rebaj\w*|exim\w*|exenci\w*|descuent\w*)\b", re.I)
+UP_PAT = re.compile(r"\b(?:aument\w*|duplic\w*|triplic\w*|increment\w*|sube|suben|subir\w*|subi[oó]|suba)\b", re.I)
 DESTACADO_FIELDS = ("titular", "que_cambia", "a_quien_afecta", "desde_cuando")
 DESTACADO_FORMAT = {"format": {"type": "json_schema", "schema": {
     "type": "object", "properties": {k: {"type": "string"} for k in DESTACADO_FIELDS},
@@ -589,17 +598,29 @@ def note_lines(notes):
         return [None] * len(notes), f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
 
 
+def titular_ok(titular, note):
+    """Neutral (sin palabras valorativas) y, si la nota baja unas cosas y sube otras, sin mostrar solo una dirección."""
+    if VALORATIVE_PAT.search(titular):
+        return False
+    if DOWN_PAT.search(note) and UP_PAT.search(note):
+        return bool(DOWN_PAT.search(titular)) == bool(UP_PAT.search(titular))
+    return True
+
+
 def destacado_fields(note):
     """{titular, que_cambia, a_quien_afecta, desde_cuando} o None si no hay titular usable. Un campo vacío o con cifras
     que no están en la nota queda vacío ("la nota no lo informa"). Lanza anthropic.APIError si la API falla."""
-    out = _complete(DESTACADO_SYSTEM, note, DESTACADO_FORMAT)
-    try:
-        data = json.loads(out or "")
-    except ValueError:
-        return None
-    fields = {k: anonymize(str(data.get(k) or "").strip()) for k in DESTACADO_FIELDS}
-    fields = {k: v if v and only_note_numbers(v, note) else "" for k, v in fields.items()}
-    return fields if fields["titular"] else None
+    for _ in range(2):  # la respuesta varía: un segundo intento suele traer un titular usable
+        try:
+            data = json.loads(_complete(DESTACADO_SYSTEM, note, DESTACADO_FORMAT) or "")
+        except ValueError:
+            continue
+        fields = {k: anonymize(str(data.get(k) or "").strip()) for k in DESTACADO_FIELDS}
+        fields = {k: v if v and only_note_numbers(v, note) else "" for k, v in fields.items()}
+        if fields["titular"] and titular_ok(fields["titular"], note):
+            return fields
+        print("Aviso: titular del destacado descartado (valorativo o muestra solo una baja o una suba)")
+    return None
 
 
 def destacado(note):

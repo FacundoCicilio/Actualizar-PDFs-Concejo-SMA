@@ -319,13 +319,16 @@ IMPACT_MESSAGES = {
 }
 
 
-DECLARACION_INTERES_PAT = re.compile(r"\bdeclar\w*\s+de\s+interes\b")  # \w* tolera "Declararación"
+# Declaraciones de interés y distinciones (sobre texto sin tildes). \w* tolera "Declararación".
+RECONOCIMIENTO_PAT = re.compile(r"\bdeclar\w*\s+de\s+interes\b|\bdistin(?:cion|guio|guid[oa]s?)\b|\bembajador"
+                                r"|\b(?:ciudadan|vecin)[oa]s?\s+(?:ilustre|destacad)|\bvisitantes?\s+ilustres?\b")
 
 
 def infer_impact(text):
     t = normalize_text(text)
-    if DECLARACION_INTERES_PAT.search(t):
-        # una declaración de interés es reconocimiento, no un cambio de tasas u obras ("Asociación Puentes de Luz")
+    if RECONOCIMIENTO_PAT.search(t):
+        # un reconocimiento no cambia tasas, obras ni escuelas aunque las nombre de paso ("Asociación Puentes de Luz",
+        # "su labor junto a instituciones educativas")
         hits = ["🎭 Cultura/Eventos"]
     else:
         t = re.sub(r"\bno\s+arancelad[oa]s?\b", " ", t)  # "Seminario No Arancelado" no es Bolsillo
