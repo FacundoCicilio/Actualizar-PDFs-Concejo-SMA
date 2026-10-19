@@ -624,30 +624,69 @@ def period_start():
     return last.date(), f"fecha del último post de @{IG_USERNAME}"
 
 
-def puesta_items(notes, start, today, excluir, skip_keys):
+def puesta_items(notes, start, today, excluir, skip_keys, slots=ic.MAX_ITEMS):
     """Notas que serían destacado, de sesiones entre start y today, sin plazo vencido, sin las excluidas ni las ya
-    publicadas como destacado; las de mayor impacto primero. Devuelve (ítems para las placas, notas descartadas)."""
+    publicadas como destacado; las de mayor peso primero. Si sobran (más que slots), se agrupa solo lo necesario: la
+    nota suelta de menor peso que comparte tema con otra placa se suma a esa placa, hasta que entren; si no hay temas
+    repetidos, se recortan las de menor peso. Devuelve (ítems para las placas, notas descartadas por texto no usable)."""
     sessions = prensa.sessions(notes)
     candidates = [(n, s) for s in sessions.values() if start <= s["date"] <= today
                   for n in destacables(s, today) if str(n["id"]) not in excluir and f"destacado:{n['id']}" not in skip_keys]
     ranked = prensa.rank([n for n, _ in candidates])
     session_of = {n["id"]: s for n, s in candidates}
-    items, dropped = [], []
-    for n in ranked:
-        if len(items) == ic.MAX_ITEMS:
+    units = [(prensa.group_key(n), [n]) for n in ranked]
+    while len(units) > slots:
+        merged = False
+        for i in range(len(units) - 1, 0, -1):
+            # a la placa más cercana del mismo tema: las de mayor peso quedan sueltas, al principio
+            j = next((j for j in range(i - 1, -1, -1) if units[j][0] == units[i][0]), None)
+            if j is not None:
+                units[j][1].extend(units.pop(i)[1])
+                merged = True
+                break
+        if not merged:
             break
-        s = session_of[n["id"]]
-        text = prensa.note_text(n)
-        fields, error = ic.destacado(text)
-        if error:
-            raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
-        line = fields and (fields["que_cambia"] or ic.note_line(text))
-        if not line:
-            dropped.append(n)
-            continue
-        items.append({"note": n, "sdoc": prensa.session_doc(s), "titular": fields["titular"], "line": line,
-                      "impact_tags": n["impact_tags"]})
+    items, dropped = [], []
+    for key, unit in units:
+        if len(items) == slots:
+            break
+        made = []
+        for n in unit:  # Haiku solo para las notas que van a salir
+            text = prensa.note_text(n)
+            fields, error = ic.destacado(text)
+            if error:
+                raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
+            line = fields and (fields["que_cambia"] or ic.note_line(text))
+            if line:
+                made.append((n, fields, line))
+            else:
+                dropped.append(n)
+        chips = lambda n: prensa.themes(n)[:1] + n["impact_tags"]  # noqa: E731
+        if len(made) == 1:
+            n, fields, line = made[0]
+            items.append({"note": n, "sdoc": prensa.session_doc(session_of[n["id"]]), "titular": fields["titular"],
+                          "line": line, "impact_tags": chips(n)})
+        elif made:
+            items.append({"notes": [n for n, _, _ in made], "titular": f"{key}: {len(made)} decisiones",
+                          "lines": [f"{f['titular']} ({ic.session_title(prensa.session_doc(session_of[n['id']]))})"
+                                    for n, f, _ in made],
+                          "impact_tags": chips(made[0][0])})
     return items, dropped
+
+
+def puesta_audiencias(notes, start, today, excluir):
+    """Audiencias públicas sobre tierras y concesiones ya realizadas en el período: [{numero, fecha, line, ids}]."""
+    auds = [a for a in prensa.audiencias(notes, start, today) if not {str(n["id"]) for n in a["notes"]} & excluir]
+    lines, error = ic.audiencia_lines([prensa.note_text(a["notes"][0]) for a in auds],
+                                      [prensa.audiencia_subject(a["notes"][0]) for a in auds])
+    if error and auds:
+        raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
+    return [{"numero": a["numero"], "fecha": a["fecha"], "line": line, "ids": [n["id"] for n in a["notes"]]}
+            for a, line in zip(auds, lines)]
+
+
+def item_ids(it):
+    return [n["id"] for n in it.get("notes") or [it["note"]]]
 
 
 def puesta_preview(excluir):
@@ -657,25 +696,36 @@ def puesta_preview(excluir):
     ensure_setup()
     start, why = period_start()
     today = now().date()
-    items, dropped = puesta_items(prensa.load_notes(), start, today, excluir,
-                                  set(state["seen"]) | set(state["pending"]) | set(state["published"]))
+    notes = prensa.load_notes()
+    auds = puesta_audiencias(notes, start, today, excluir)
+    items, dropped = puesta_items(notes, start, today, excluir,
+                                  set(state["seen"]) | set(state["pending"]) | set(state["published"]),
+                                  slots=ic.MAX_ITEMS - (1 if auds else 0))
     head = [f"Período: sesiones desde el **{start:%d/%m/%Y}** ({why}) hasta hoy.", ""]
     if excluir:
         head += [f"Notas excluidas a pedido: {', '.join(sorted(excluir))}.", ""]
     if dropped:
         head += [f"Sin texto usable (quedan afuera): {', '.join(str(n['id']) for n in dropped)}.", ""]
-    if not items:
+    if not items and not auds:
         number, url = create_issue("Vista previa Instagram: Puesta al día", "\n".join(head + [
             "No hay notas de Bolsillo, Servicios u Obras con un plazo vigente en ese período: no hay nada para publicar."]),
             ["instagram-puesta-al-dia"])
         print(f"Puesta al día sin notas: {url}")
         return 0
     head += ["### Notas incluidas (id para el campo `excluir`)", ""]
-    head += [f"- `{it['note']['id']}` {it['titular']} — [nota]({it['note']['link']})" for it in items]
+    for it in items:
+        if "lines" in it:
+            head += [f"- {it['titular']}:"] + [f"  - `{n['id']}` {line} — [nota]({n['link']})" for n, line in zip(it["notes"], it["lines"])]
+        else:
+            head += [f"- `{it['note']['id']}` {it['titular']} — [nota]({it['note']['link']})"]
+    if auds:
+        head += ["", f"### {ic.AUDIENCIA_TITLE} (ids para `excluir`)", ""]
+        head += [f"- {', '.join(f'`{i}`' for i in a['ids'])} N° {a['numero']}: {a['line']} (audiencia del {a['fecha']:%d/%m})"
+                 for a in auds]
     head += ["", "**No se publica nada todavía.** Si está bien, corré el workflow **Puesta al día** con `publicar = sí`: "
                  "publica exactamente estas placas y este texto. Para sacar notas, corrélo de nuevo con `excluir`."]
     with tempfile.TemporaryDirectory() as tmp:
-        paths = ic.render_puesta(start, today, items, tmp, ext="jpg")
+        paths = ic.render_puesta(start, today, items, tmp, ext="jpg", audiencias=auds)
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
         urls = upload_images(paths, f"puesta-{now():%Y%m%d%H%M%S}")
     old = state.get("puesta")
@@ -685,7 +735,7 @@ def puesta_preview(excluir):
         comment(old["issue"], f"Reemplazada por la vista previa #{number}.")
         close_issue(old["issue"])
     state["puesta"] = {"issue": number, "images": urls, "caption": caption, "created_at": iso(now()), "status": "preview",
-                       "since": start.isoformat(), "notes": [it["note"]["id"] for it in items]}
+                       "since": start.isoformat(), "notes": [i for it in items for i in item_ids(it)]}
     save_state(state, "Instagram: vista previa de la puesta al día")
     print(f"Puesta al día: vista previa en {url}")
     return 0

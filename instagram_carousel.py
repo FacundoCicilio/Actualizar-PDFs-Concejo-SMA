@@ -787,33 +787,108 @@ def puesta_cover(start, today, n):
     return img
 
 
+# Temas de fondo (prensa.THEMES) que no son etiquetas de impacto: chip y texto propios.
+THEME_MESSAGES = {
+    "Tierras": "Decisión sobre tierras o inmuebles municipales.",
+    "Concesiones": "Decisión sobre una concesión o licitación municipal.",
+    "Presupuesto": "Decisión sobre el presupuesto o el endeudamiento municipal.",
+    "Normas urbanas": "Puede cambiar las reglas para construir o usar el suelo.",
+    "Tránsito": "Puede cambiar la circulación o el transporte.",
+}
+
+
 def puesta_slide(item, pos, n, page, total):
-    """item: {sdoc, titular, line, impact_tags}."""
-    sdoc = item["sdoc"]
+    """item: {sdoc, titular, line, impact_tags} o, agrupado por tema, {titular, lines, impact_tags}."""
     tags = (item.get("impact_tags") or [])[:2]
-    blocks = [text_block(f"{session_title(sdoc)} · {date_long(sdoc['date'])}".upper(), (32, 28), PUESTA[0], 28, bold=True),
-              text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 300, bold=True),
-              text_block("En criollo:", (36,), PUESTA[0], 8, bold=True),
-              text_block(item["line"], (44, 40, 36, 34, 32), INK, 44, 320)]
-    blocks += impact_blocks(tags, IMPACT_MESSAGES.get(tags[0], "") if tags else "")
+    msg = THEME_MESSAGES.get(tags[0]) or IMPACT_MESSAGES.get(tags[0], "") if tags else ""
+    if "lines" in item:  # varias decisiones del mismo tema, de distintas sesiones
+        blocks = [text_block("VARIAS SESIONES", (32, 28), PUESTA[0], 28, bold=True),
+                  text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 200, bold=True)]
+        blocks += [text_block(f"• {line}", (40, 36, 34, 32, 30), INK, 18, 200) for line in item["lines"]]
+    else:
+        sdoc = item["sdoc"]
+        blocks = [text_block(f"{session_title(sdoc)} · {date_long(sdoc['date'])}".upper(), (32, 28), PUESTA[0], 28, bold=True),
+                  text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 300, bold=True),
+                  text_block("En criollo:", (36,), PUESTA[0], 8, bold=True),
+                  text_block(item["line"], (44, 40, 36, 34, 32), INK, 44, 320)]
+    blocks += impact_blocks(tags, msg)
     return content_slide("PUESTA AL DÍA", "", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
 
 
-def puesta_caption(start, today, items):
+AUDIENCIA_TITLE = "Pasaron por audiencia pública"
+AUDIENCIA_NOTE = "Se realizó la audiencia pública; la decisión final la toma el Concejo en sesión."
+AUDIENCIA_SYSTEM = (
+    "Recibís una nota de prensa del Concejo Deliberante de San Martín de los Andes sobre una audiencia pública. "
+    "Devolvé solo el tema que trató la audiencia, en una frase de hasta 12 palabras, en español rioplatense simple, "
+    "que empiece con 'Propuesta de' o 'Proyecto de' (por ejemplo: 'Proyecto de donación de un lote municipal al "
+    "Obispado de Neuquén' o 'Propuesta de comodato de la cancha Elías Sapag a la Liga de Fútbol'). Es solo lo que se "
+    "propone: no digas que se aprobó, que se autorizó ni qué opinaron, no lo califiques y no afirmes plazos ni "
+    "resultados como hechos. "
+    "No nombres a personas particulares (clubes, juntas vecinales e instituciones sí). Sin comillas, sin emojis y sin "
+    "punto final."
+)
+# La audiencia no decide nada: si la línea sugiere una decisión o califica, se usa el tema que sale del título.
+AUDIENCIA_BAD_PAT = re.compile(r"\b(?:aprob\w*|sancion\w*|otorg\w*|autoriz\w*|acord\w*|rechaz\w*|decidi\w*|resolvi\w*"
+                               r"|habilit\w*)\b", re.I)
+# Que se lea como propuesta: una frase nominal suelta ("Extensión del comodato hasta 2027") parece un hecho.
+AUDIENCIA_START_PAT = re.compile(r"^(?:Propuesta|Proyecto) de\b")
+
+
+def audiencia_line(note, fallback):
+    """Tema de la audiencia en una línea neutral, o fallback si la respuesta no sirve. Lanza anthropic.APIError."""
+    out = anonymize((_complete(AUDIENCIA_SYSTEM, note) or "").strip("\"“”' .\n"))
+    if not AUDIENCIA_START_PAT.match(out) or AUDIENCIA_BAD_PAT.search(out) or VALORATIVE_PAT.search(out) or not only_note_numbers(out, note):
+        return fallback
+    return shorten(out, 110)
+
+
+def audiencia_lines(notes, fallbacks):
+    """(líneas, error) como note_lines; sin API key o si la API falla, error (no se usan los títulos a medias)."""
+    if not api_key():
+        return list(fallbacks), "Falta ANTHROPIC_API_KEY."
+    try:
+        return [audiencia_line(n, f) for n, f in zip(notes, fallbacks)], None
+    except anthropic.APIError as e:
+        return list(fallbacks), f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
+
+
+def audiencias_slide(auds, page, total):
+    """auds: [{line, fecha}]: una línea por audiencia, con la aclaración de que la decisión es del Concejo."""
+    blocks = [text_block(AUDIENCIA_TITLE, (60, 56, 52, 48), INK, 32, 160, bold=True)]
+    lines = [f"• {a['line']} (audiencia del {a['fecha']:%d/%m})" for a in auds]
+    sizes = (38, 36, 34, 32, 30)  # un solo tamaño para todas las líneas, el mayor en que cada una entra en 110 px
+    size = next((s for s in sizes if all(len(wrap(MEASURE, t, font(s), W - 2 * M)) * int(s * 1.32) <= 110 for t in lines)),
+                sizes[-1])
+    blocks += [text_block(t, (size,), INK, 16, 110) for t in lines]
+    blocks += [("rule", None, None, None, LINE, 32, 2), text_block(AUDIENCIA_NOTE, (36, 34, 32, 30), MUTED, 0, 120, bold=True)]
+    return content_slide("PUESTA AL DÍA", "", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
+
+
+def puesta_caption(start, today, items, auds=()):
     lines = [f"🗓️ Puesta al día: lo más importante que aprobó el Concejo desde {month_since(start, today)}", ""]
-    lines += [f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])})" for it in items]
+    for it in items:
+        if "lines" in it:
+            lines += [f"• {it['titular']}:"] + [f"   – {line}" for line in it["lines"]]
+        else:
+            lines.append(f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])})")
+    if auds:
+        lines += ["", f"{AUDIENCIA_TITLE}:"] + [f"• {a['line']} (audiencia del {a['fecha']:%d/%m})" for a in auds]
+        lines += [AUDIENCIA_NOTE]
     lines += ["", "Deslizá para ver el detalle 👉", FUENTE, "Más info: link en la bio.", "", HASHTAGS]
     return "\n".join(lines)
 
 
-def render_puesta(start, today, items, out_dir, prefix="puesta", ext="png"):
-    """Portada + hasta MAX_ITEMS placas (ya ordenadas por impacto) + cierre."""
-    items = items[:MAX_ITEMS]
-    total = len(items) + 2
+def render_puesta(start, today, items, out_dir, prefix="puesta", ext="png", audiencias=()):
+    """Portada + placas (ya ordenadas por peso) + "Pasaron por audiencia pública" (si hay) + cierre. Instagram admite
+    10 imágenes: la placa de audiencias nunca se recorta; se recortan los destacados de menor peso."""
+    items = items[:MAX_ITEMS - (1 if audiencias else 0)]
+    total = len(items) + (1 if audiencias else 0) + 2
     slides = [puesta_cover(start, today, len(items))]
     slides += [puesta_slide(it, i, len(items), i + 1, total) for i, it in enumerate(items, start=1)]
+    if audiencias:
+        slides.append(audiencias_slide(audiencias, len(items) + 2, total))
     slides.append(closing(PUESTA))
-    return save_slides(slides, out_dir, prefix, ext, puesta_caption(start, today, items))
+    return save_slides(slides, out_dir, prefix, ext, puesta_caption(start, today, items, audiencias))
 
 
 def load_doc(path):

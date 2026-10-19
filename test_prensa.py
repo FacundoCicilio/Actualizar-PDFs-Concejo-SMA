@@ -17,6 +17,11 @@ from test_instagram import DOC
 NOTAS = json.loads(Path(__file__).with_name("tests").joinpath("prensa_notas.json").read_text(encoding="utf-8"))
 
 
+# Todas las notas de Prensa del 1/6 al 18/10/2026 (auditoría de la puesta al día).
+PERIODO = json.loads(Path(__file__).with_name("tests").joinpath("prensa_notas_2026-06_10.json").read_text(encoding="utf-8"))
+INICIO, HOY = date(2026, 6, 1), date(2026, 10, 18)
+
+
 def key_of(note_id):
     s = prensa.session_of(NOTAS[str(note_id)])
     return s and s["key"]
@@ -80,6 +85,71 @@ class SesionTest(unittest.TestCase):
     def test_texto_para_claude_anonimizado(self):
         texto = prensa.note_text({"title": "Pedido", "text": "Solicitud del Sr. David Figueroa de baja"})
         self.assertNotIn("Figueroa", texto)
+
+
+class CriterioDestacadoTest(unittest.TestCase):
+    """Criterio acordado tras la auditoría: temas de fondo, sin falsos positivos y sin notas políticas."""
+
+    def setUp(self):
+        self.notas = {n["id"]: n for s in prensa.sessions(PERIODO).values() for n in s["notes"]}
+
+    def test_temas_de_fondo_entran(self):
+        self.assertTrue(prensa.is_destacado(self.notas[1531]))  # cesión de tierras para la EPET 30 en Chacra 32
+        self.assertEqual(prensa.themes(self.notas[1531]), ["Tierras"])
+        self.assertTrue(prensa.is_destacado(self.notas[1091]))  # reductores de velocidad
+        self.assertEqual(prensa.themes(self.notas[1091]), ["Tránsito"])
+
+    def test_falsos_positivos_quedan_afuera(self):
+        self.assertFalse(prensa.is_destacado(self.notas[1608]))  # "contratación" de profesionales no es una obra
+        self.assertFalse(prensa.is_destacado(self.notas[1130]))  # el nombre de un puente es un homenaje
+        self.assertEqual(self.notas[1130]["impact_tags"], ["🎭 Cultura/Eventos"])
+
+    def test_notas_politicas_quedan_afuera_por_neutralidad(self):
+        for note_id in ("1270", "1552"):  # presentaciones contra el intendente; juicio político
+            self.assertTrue(prensa.POLITICAL_TITLE_PAT.search(PERIODO[note_id]["title"]), note_id)
+            self.assertIsNone(prensa.session_of(PERIODO[note_id]), note_id)
+        self.assertFalse({1270, 1552} & set(self.notas))  # tampoco en "Qué se aprobó"
+
+    def test_seleccion_del_periodo(self):
+        candidatas = [n for s in prensa.sessions(PERIODO).values() if INICIO <= s["date"] <= HOY
+                      for n in s["notes"] if prensa.is_destacado(n) and not prensa.vencida(n, HOY)]
+        self.assertEqual([n["id"] for n in prensa.rank(candidatas)], [1777, 1508, 1531, 1611, 1612, 1072, 1782, 1091])
+
+
+class AudienciasTest(unittest.TestCase):
+    def test_una_por_numero_y_solo_las_realizadas(self):
+        auds = prensa.audiencias(PERIODO, INICIO, HOY)
+        self.assertEqual([a["numero"] for a in auds], [3, 5, 4, 6, 7, 8, 9, 10])  # por fecha; la N° 2 (Real Maipú) se postergó
+        por_numero = {a["numero"]: [n["id"] for n in a["notes"]] for a in auds}
+        self.assertEqual(por_numero[6], [1179, 1425])   # convocatoria + realización del Club Cumbres, juntas
+        self.assertEqual(por_numero[10], [1556, 1763])  # quiosco de Plaza Sarmiento
+        self.assertEqual(por_numero[5], [1172])         # desafectación de calle para la EPET 30
+        self.assertTrue(all(a["fecha"] <= HOY for a in auds))
+
+    def test_audiencia_futura_no_va(self):
+        self.assertEqual([a["numero"] for a in prensa.audiencias(PERIODO, INICIO, date(2026, 8, 5))], [3, 5])
+
+    def test_tema_del_titulo(self):
+        self.assertEqual(prensa.audiencia_subject(PERIODO["1119"]), "Donación de un lote al Obispado de Neuquén")
+
+    def test_linea_nunca_dice_que_se_aprobo(self):
+        nota = prensa.note_text(PERIODO["1119"])
+        for texto, esperado in [("Se aprobó la donación de un lote al Obispado", "respaldo"),
+                                ("El Concejo autorizó la donación", "respaldo"),
+                                ("Donación de un lote municipal al Obispado de Neuquén", "respaldo"),
+                                ("Proyecto de donación de un lote municipal al Obispado de Neuquén", None)]:
+            resp = SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=texto)])
+            with mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=mock.Mock(return_value=resp)))):
+                self.assertEqual(ic.audiencia_line(nota, "respaldo"), esperado or texto, texto)
+
+    def test_linea_no_afirma_plazos_como_hecho(self):
+        nota = prensa.note_text(PERIODO["1594"])  # Don Márquez: la vista previa decía "Extensión ... hasta 2027"
+        tema = prensa.audiencia_subject(PERIODO["1594"])
+        for texto, esperado in [("Extensión del comodato del Club Don Márquez hasta 2027", tema),
+                                ("Propuesta de extender el comodato del Club Don Márquez", None)]:
+            resp = SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=texto)])
+            with mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=mock.Mock(return_value=resp)))):
+                self.assertEqual(ic.audiencia_line(nota, tema), esperado or texto, texto)
 
 
 class VigenciaTest(unittest.TestCase):

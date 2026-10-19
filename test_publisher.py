@@ -129,6 +129,7 @@ class PublisherTest(unittest.TestCase):
             mock.patch.object(ic, "criollo_lines", lambda items: ([None] * len(items), None)),
             mock.patch.object(ic, "note_lines", lambda notes: (["El Concejo aprobó algo."] * len(notes), None)),
             mock.patch.object(ic, "destacado", lambda note: (dict(CAMPOS), None)),
+            mock.patch.object(ic, "audiencia_lines", lambda notes, fallbacks: (list(fallbacks), None)),
             mock.patch.object(prensa, "load_notes", lambda save=True: self.notes),
             mock.patch.object(pub, "_token", None),
             mock.patch("builtins.print"),
@@ -395,6 +396,37 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(self.ig.published(), [])
         self.assertEqual(self.state["puesta"]["notes"], [60, 62])
 
+    def test_puesta_con_las_notas_reales_del_periodo(self):
+        import json
+        from pathlib import Path
+        self.run_pub()
+        self.notes = json.loads((Path(pub.__file__).with_name("tests") / "prensa_notas_2026-06_10.json").read_text(encoding="utf-8"))
+        self.ig.recent = [{"id": "m1", "timestamp": "2026-06-01T12:00:00+0000", "caption": "Último post"}]
+        pub.puesta_preview(set())
+        [issue] = self.gh.by_label("instagram-puesta-al-dia")
+        body = issue["body"]
+        # 8 destacados y la placa de audiencias no entran en 10 imágenes: se agrupa lo de menor peso, nunca las audiencias
+        self.assertIn("![Placa 10]", body)
+        self.assertNotIn("![Placa 11]", body)
+        self.assertIn("- Servicios: 2 decisiones:", body)
+        for fuera in ("`1608`", "`1130`", "`1270`", "`1552`", "`1482`"):
+            self.assertNotIn(fuera, body)
+        caption = self.state["puesta"]["caption"]
+        audiencias = caption.split("Pasaron por audiencia pública:")[1].split("Deslizá")[0]
+        self.assertEqual(audiencias.count("• "), 8)
+        self.assertIn("Se realizó la audiencia pública; la decisión final la toma el Concejo en sesión.", audiencias)
+        self.assertNotRegex(audiencias.lower(), r"aprob")
+        self.assertNotIn("Real Maipú", caption)
+
+    def test_puesta_excluir_una_audiencia(self):
+        import json
+        from pathlib import Path
+        self.run_pub()
+        self.notes = json.loads((Path(pub.__file__).with_name("tests") / "prensa_notas_2026-06_10.json").read_text(encoding="utf-8"))
+        self.ig.recent = [{"id": "m1", "timestamp": "2026-06-01T12:00:00+0000", "caption": "Último post"}]
+        pub.puesta_preview({"1763"})  # la realización del quiosco: saca la audiencia N° 10 entera
+        self.assertNotIn("quiosco", self.state["puesta"]["caption"].split("Pasaron por audiencia pública:")[1])
+
     def test_puesta_sin_dato_de_instagram_usa_el_1_de_junio(self):
         self.run_pub()
         self.puesta_notas()
@@ -412,6 +444,10 @@ class PublisherTest(unittest.TestCase):
         [issue] = self.gh.by_label("instagram-puesta-al-dia")
         self.assertIn("![Placa 10]", issue["body"])
         self.assertNotIn("![Placa 11]", issue["body"])
+        # 10 candidatas del mismo tema (la 70 venció): 7 placas sueltas y las 3 de menor peso juntas en la última
+        self.assertIn("- Bolsillo: 3 decisiones:", issue["body"])
+        self.assertLess(issue["body"].index("- `60` "), issue["body"].index("- Bolsillo: 3 decisiones:"))
+        self.assertEqual(len(self.state["puesta"]["notes"]), 10)
 
     def test_puesta_publica_lo_revisado_una_sola_vez(self):
         self.run_pub()

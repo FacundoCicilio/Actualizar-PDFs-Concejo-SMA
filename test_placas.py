@@ -126,9 +126,11 @@ class SinSuperposicionTest(unittest.TestCase):
         notas = [(n, s) for key in ("2026-O18", "2026-O23") for s in [sesiones[key]] for n in prensa.rank(s["notes"])]
         for tipo, texto in TEXTOS.items():
             items = [{"sdoc": prensa.session_doc(s), "titular": texto if tipo == "largo" else "El Concejo modificó la Tasa COM",
-                      "line": texto, "impact_tags": n["impact_tags"]} for n, s in notas]
+                      "line": texto, "impact_tags": ["Tierras"] + n["impact_tags"]} for n, s in notas]
+            items[-1] = {"titular": "Servicios: 3 decisiones", "lines": [texto] * 3, "impact_tags": ["🚰 Servicios"]}
+            auds = [{"line": texto if tipo == "largo" else "Comodato de la cancha Elías Sapag", "fecha": date(2026, 8, 10)}] * 8
             self.verificar(f"puesta al día, {tipo}",
-                           lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out))
+                           lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out, audiencias=auds))
 
     def test_si_no_entra_achica_o_recorta(self):
         blocks = [ic.text_block(LARGO, (72, 60, 48), ic.INK, 44, 900, bold=True),

@@ -321,7 +321,8 @@ IMPACT_MESSAGES = {
 
 # Declaraciones de interés y distinciones (sobre texto sin tildes). \w* tolera "Declararación".
 RECONOCIMIENTO_PAT = re.compile(r"\bdeclar\w*\s+de\s+interes\b|\bdistin(?:cion|guio|guid[oa]s?)\b|\bembajador"
-                                r"|\b(?:ciudadan|vecin)[oa]s?\s+(?:ilustre|destacad)|\bvisitantes?\s+ilustres?\b")
+                                r"|\b(?:ciudadan|vecin)[oa]s?\s+(?:ilustre|destacad)|\bvisitantes?\s+ilustres?\b"
+                                r"|\bllevara\s+el\s+nombre|\bdesigna\w*\s+con\s+el\s+nombre|\bimpon\w*\s+el\s+nombre")
 
 
 def infer_impact(text):

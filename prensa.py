@@ -8,7 +8,7 @@ from datetime import date, datetime
 import requests
 
 import instagram_carousel as ic
-from actas_parser import MONTHS, infer_impact
+from actas_parser import MONTHS, infer_impact, normalize_text
 from hf_dataset_store import DATASET_REPO_ID, load_json, save_json
 
 API = "https://prensacd.cdsma.gob.ar/wp-json/wp/v2/posts"
@@ -25,6 +25,23 @@ APPROVED_PAT = re.compile(r"\b(?:aprob[oó]|fue\s+aprobad[oa]|otorg[oó]|declar[
                           r"|sancion[oó]|autoriz[oó]|exim(?:i[oó]|e)|ratific[oó])\b", re.I)
 NOT_APPROVED_PAT = re.compile(r"\btratar[aá]\b|\brechaz|\bEstudiantil\b", re.I)
 EXCLUDED_TITLE_PAT = re.compile(r"Audiencia\s+P[uú]blica|Estudiantil", re.I)
+# Conflictos políticos del Concejo con el intendente: la cuenta no los publica, por neutralidad.
+POLITICAL_TITLE_PAT = re.compile(r"juicio\s+pol[ií]tico|contra\s+el\s+intendente|destituci[oó]n", re.I)
+# Temas de fondo que van como destacado aunque no tengan etiqueta de Bolsillo/Servicios/Obras: (patrón sobre el título y
+# el comienzo sin tildes, peso para ordenar). Bolsillo pesa 5, Servicios y Obras 4 (ic.IMPACT_WEIGHT y OBRA_WEIGHT).
+THEMES = {
+    "Presupuesto": (re.compile(r"presupuesto|endeudamiento|prestamo|financiamiento"), 5),
+    "Tierras": (re.compile(r"\bcesion|comodato|donacion|\bventa de (?:un |una |los |las )?(?:lote|tierra|inmueble|parcela)"
+                           r"|adjudicacion|desafectacion|permuta|regularizacion dominial"), 4),
+    "Concesiones": (re.compile(r"concesion|licitacion|pliego"), 4),
+    "Normas urbanas": (re.compile(r"codigo de edificacion|codigo urbano|zonificacion|ordenamiento territorial|factibilidad"), 3),
+    "Tránsito": (re.compile(r"transporte|colectivo|\btaxi|remis|estacionamiento|reductor|lomos? de burro"), 3),
+}
+# "Contratación" sola no alcanza para Obras (la adhesión a una ley de capacitación habla de contratar profesionales).
+OBRA_PAT = re.compile(r"\bobras?\b|licitacion|pavimento|asfalto|cordon cuneta|red de agua|cloaca")
+OBRA_WEIGHT = 4
+# En las notas de tierras, lote/chacra/manzana/donación describen el bien, no un trámite de un particular.
+TIERRAS_INDIVIDUAL_OK = re.compile(r"lotes?\s+\d|manzana\s+\w|chacra\s+\d|a favor de|donaci[oó]n|regularizaci[oó]n dominial", re.I)
 _MES = "|".join(MONTHS)
 # Fin de vigencia o de plazo: "hasta el 30 de septiembre de 2026", "del 1 al 30 de septiembre", "vence el 30 de …",
 # y solo con mes: "hasta diciembre de 2026", "de agosto a diciembre de 2026" (fin de ese mes).
@@ -65,8 +82,8 @@ def _sentence(text, start, end):
 
 def session_of(note):
     """{key, number, kind, year, date} de la primera sesión que menciona una nota que confirma una aprobación, o None
-    (sin sesión, "tratará", "rechazó", Concejo Estudiantil, audiencias públicas)."""
-    if EXCLUDED_TITLE_PAT.search(note["title"]):
+    (sin sesión, "tratará", "rechazó", Concejo Estudiantil, audiencias públicas, conflictos políticos)."""
+    if EXCLUDED_TITLE_PAT.search(note["title"]) or POLITICAL_TITLE_PAT.search(note["title"]):
         return None
     text = note["text"]
     m = SESSION_PAT.search(text)
@@ -115,13 +132,100 @@ def impact_tags(note):
     return infer_impact(f"{note['title']}. {note['text'][:400]}")["impact_tags"]
 
 
+def lead(note, chars=400):
+    return normalize_text(f"{note['title']}. {note['text'][:chars]}")
+
+
+def themes(note):
+    """Temas de fondo de la nota, el de mayor peso primero."""
+    t = lead(note)
+    return sorted((name for name, (pat, _) in THEMES.items() if pat.search(t)), key=lambda k: -THEMES[k][1])
+
+
+def destacado_tags(note):
+    """Etiquetas que cuentan para el destacado: Obras solo si la nota habla de obras, no de una contratación cualquiera."""
+    tags = set(note["impact_tags"]) & DESTACADO_TAGS
+    if "🏗 Infraestructura" in tags and not OBRA_PAT.search(lead(note)):
+        tags.discard("🏗 Infraestructura")
+    return tags
+
+
+def weight(note):
+    tags = destacado_tags(note)
+    w = [ic.IMPACT_WEIGHT.get(t, 0) for t in note["impact_tags"]] + [THEMES[t][1] for t in themes(note)]
+    return max(w + ([OBRA_WEIGHT] if "🏗 Infraestructura" in tags else []), default=0)
+
+
+def general(note):
+    """Alcance general: el de ic.is_relevant o un tema de fondo (en tierras, sin descartar por lote/chacra/donación)."""
+    if not themes(note):
+        return ic.is_relevant(note)
+    title = TIERRAS_INDIVIDUAL_OK.sub(" ", note["title"]) if "Tierras" in themes(note) else note["title"]
+    return not ic.INDIVIDUAL_PAT.search(title)
+
+
 def rank(notes):
-    """Primero las de alcance general, después el resto; dentro de cada grupo, mayor impacto primero."""
-    return sorted(notes, key=lambda n: (ic.is_relevant(n), ic.impact_score(n)), reverse=True)
+    """Primero las de alcance general, después el resto; dentro de cada grupo, mayor peso (tema o impacto) primero."""
+    return sorted(notes, key=lambda n: (general(n), weight(n), len(n["impact_tags"])), reverse=True)
 
 
 def is_destacado(note):
-    return ic.is_relevant(note) and bool(DESTACADO_TAGS & set(note["impact_tags"]))
+    return general(note) and bool(destacado_tags(note) or themes(note))
+
+
+def group_key(note):
+    """Tema para agrupar en la puesta al día cuando sobran notas: el tema de fondo o, si no, la etiqueta principal."""
+    if themes(note):
+        return themes(note)[0]
+    tags = sorted(destacado_tags(note), key=lambda t: -ic.IMPACT_WEIGHT.get(t, 0))
+    return ic.strip_emoji(tags[0]) if tags else "Otros"
+
+
+# ------------------------------------------------------------------ audiencias públicas (no son aprobaciones)
+AUDIENCIA_NUM_PAT = re.compile(r"Audiencia\s+P[uú]blica\s+N\.?\s*[°º]?\s*(\d{1,3})", re.I)
+AUDIENCIA_DATE_PAT = re.compile(rf"(?:realizar[aá]|realiz[oó]|celebr[oó]|llev[oó] a cabo)[^.]{{0,70}}?\b(\d{{1,2}}) de ({_MES})"
+                                rf"(?: de (\d{{4}}))?", re.I)
+DONE_PAT = re.compile(r"\b(?:se realiz[oó]|realiz[oó]|celebr[oó]|llev[oó] a cabo)\b[^.]{0,40}Audiencia", re.I)
+POSTPONED_PAT = re.compile(r"\bposterg", re.I)
+AUDIENCIA_THEME_PAT = re.compile(r"comodato|donacion|cesion|concesion|licitacion|desafectacion|venta de|permuta")
+
+
+def audiencia_subject(note):
+    """Tema de la audiencia según el título ("…por la donación de un lote al Obispado…"): respaldo si Haiku no sirve."""
+    m = re.search(r"\b(?:por|sobre)\s+(?:el\s+|la\s+|un\s+|una\s+)?(.+)$", note["title"], re.I)
+    s = (m.group(1) if m else note["title"]).strip(" .")
+    return s[:1].upper() + s[1:]
+
+
+def audiencias(notes, start, today):
+    """Audiencias públicas sobre tierras y concesiones que ya se hicieron entre start y today, una por número
+    (convocatoria y realización juntas). Las postergadas sin nota de realización no van.
+    Devuelve [{numero, fecha, notes}] ordenadas por fecha; notes: la convocatoria primero (describe el tema)."""
+    by_num = {}
+    for n in sorted(notes.values(), key=lambda n: n["date"]):
+        m = AUDIENCIA_NUM_PAT.search(f"{n['title']} {n['text']}")
+        if m and re.search(r"Audiencia\s+P[uú]blica", n["title"], re.I):
+            by_num.setdefault((int(n["date"][:4]), int(m.group(1))), []).append(n)
+    out = []
+    for (year, num), ns in by_num.items():
+        done = any(DONE_PAT.search(f"{n['title']}. {n['text'][:300]}") for n in ns)
+        if any(POSTPONED_PAT.search(n["title"]) for n in ns) and not done:
+            continue
+        if not any(AUDIENCIA_THEME_PAT.search(lead(n, 700)) for n in ns):
+            continue
+        fechas = []
+        for n in ns:
+            d = AUDIENCIA_DATE_PAT.search(n["text"])
+            if d:
+                try:
+                    fechas.append(date(int(d.group(3) or year), MONTHS[d.group(2).lower()], int(d.group(1))))
+                except ValueError:
+                    pass
+        # sin fecha en el texto ("este lunes"): a más tardar, el día de la nota de realización
+        fecha = max(fechas) if fechas else max(datetime.fromisoformat(n["date"]).date() for n in ns)
+        if start <= fecha <= today:  # ya ocurrió: la fecha programada pasó (y no se postergó) o hay nota de realización
+            out.append({"numero": num, "fecha": fecha, "notes": ns})
+    return sorted(out, key=lambda a: a["fecha"])
 
 
 def vigencia_hasta(note):
