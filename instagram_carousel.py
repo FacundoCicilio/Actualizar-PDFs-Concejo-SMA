@@ -26,16 +26,19 @@ MUTED = "#5B6573"
 LINE = "#D9D4C7"
 ACCENT = "#1F4E79"
 ACCENT_SOFT = "#C9D8E8"
+APROBADO = ("#2E6B3F", "#CFE3D4")   # acento (fondo) y suave de "Qué se aprobó": se distingue del azul del orden del día
+DESTACADO = ("#8A4B0F", "#F1DCC4")
+FUENTE = "Fuente: Prensa del Concejo Deliberante (prensacd.cdsma.gob.ar)"
 
 # Peso de cada impacto para ordenar los ítems: primero lo que toca el bolsillo y los servicios.
 IMPACT_WEIGHT = {
     "💰 Bolsillo": 5, "🚰 Servicios": 4, "🚦 Tránsito/Seguridad": 3, "🏗 Infraestructura": 3,
-    "🏘 Urbanismo": 3, "🌿 Ambiente": 3, "🏪 Comercio": 2, "🎭 Cultura/Eventos": 1,
+    "🏘 Urbanismo": 3, "🌿 Ambiente": 3, "📚 Educación": 3, "🏪 Comercio": 2, "🎭 Cultura/Eventos": 1,
 }
 TAG_COLOR = {
     "💰 Bolsillo": "#9A3B2E", "🚰 Servicios": "#1F6F8B", "🚦 Tránsito/Seguridad": "#9C6614",
     "🏗 Infraestructura": "#4F5390", "🏘 Urbanismo": "#3E7C59", "🌿 Ambiente": "#2F6E46",
-    "🏪 Comercio": "#7E5227", "🎭 Cultura/Eventos": "#7A3E73",
+    "📚 Educación": "#5A6B1E", "🏪 Comercio": "#7E5227", "🎭 Cultura/Eventos": "#7A3E73",
 }
 HASHTAGS = "#SanMartinDeLosAndes #SMAndes #ConcejoDeliberante #Neuquen #Patagonia #ObservatorioDeActas #TransparenciaMunicipal"
 
@@ -174,21 +177,27 @@ def api_key():
     return env_value("ANTHROPIC_API_KEY")
 
 
-def _ask_claude(official_text):
-    """Pide la línea a Claude. Lanza anthropic.APIError si la API falla; None si la respuesta no sirve."""
+def _complete(system, text, output_config=None):
+    """Texto de la respuesta de Claude Haiku. Lanza anthropic.APIError si la API falla; None si la respuesta no sirve."""
     global _client
     if _client is None:
         _client = anthropic.Anthropic(api_key=api_key(), timeout=30.0, max_retries=2)
     resp = _client.messages.create(
         model=CRIOLLO_MODEL,
         max_tokens=1024,
-        output_config={"effort": "low"},
-        system=CRIOLLO_SYSTEM,
-        messages=[{"role": "user", "content": official_text}],  # ya anonimizado: los nombres no salen del sistema
+        output_config={"effort": "low", **(output_config or {})},
+        system=system,
+        messages=[{"role": "user", "content": text}],  # ya anonimizado: los nombres no salen del sistema
     )
     if resp.stop_reason != "end_turn":  # refusal / max_tokens: mejor sin línea que con una cortada
         return None
-    out = "".join(b.text for b in resp.content if b.type == "text").strip()
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+def _ask_claude(official_text):
+    out = _complete(CRIOLLO_SYSTEM, official_text)
+    if out is None:
+        return None
     out = re.sub(r"^En criollo:\s*", "", out, flags=re.I).strip("\"“”' ")
     if DECIDED_PAT.search(out):
         print("Aviso: linea 'En criollo' descartada (daba el tema por aprobado)")
@@ -259,8 +268,21 @@ def date_long(date_str):
     return f"{d.day} de {month} de {d.year}"
 
 
+def session_word(doc):
+    return "Sesión Especial" if doc.get("session_kind") == "Especial" else "Sesión"
+
+
 def session_title(doc):
-    return f"Sesión N° {doc['session_number']}" if doc.get("session_number") else "Orden del Día"
+    return f"{session_word(doc)} N° {doc['session_number']}" if doc.get("session_number") else "Orden del Día"
+
+
+def more_count(doc, items):
+    """Puntos del orden del día que no entran en el carrusel (sin alcance general o más allá de MAX_ITEMS)."""
+    return max(0, sum(1 for it in doc.get("items") or [] if (it.get("que_dice") or "").strip()) - len(items))
+
+
+def y_mas(n):
+    return f"y {n} tema{'s' if n != 1 else ''} más" if n else ""
 
 
 def shorten(text, limit):
@@ -273,7 +295,9 @@ def build_caption(doc, items):
     lines = [head, "", f"El Concejo Deliberante de San Martín de los Andes trata {n} puntos en esta sesión."]
     if items:
         lines[-1] += " Los de alcance general:"
-        lines += [""] + [f"• {shorten(official_text(it), 110)}" for it in items[:3]]
+        lines += [""] + [f"• {shorten(official_text(it), 110)}" for it in items]
+        if more_count(doc, items):
+            lines += [f"…{y_mas(more_count(doc, items))}."]
         lines += ["", "Deslizá para ver el detalle 👉"]
     lines += ["Más info: link en la bio.", "", HASHTAGS]
     return "\n".join(lines)
@@ -329,16 +353,17 @@ def brand_bar(draw, color, right_text="", right_color=None):
         draw.text((W - M - draw.textlength(right_text, font=fnt), 70), right_text, font=fnt, fill=right_color or color)
 
 
-def cover(doc, n_selected):
-    img = Image.new("RGB", (W, H), ACCENT)
+def cover(doc, n_selected, n_more=0, kicker="ORDEN DEL DÍA", colors=(ACCENT, ACCENT_SOFT), teaser=None):
+    accent, soft = colors
+    img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
     brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=ACCENT_SOFT, width=2)
+    d.line((M, 130, W - M, 130), fill=soft, width=2)
     y = 330
-    d.text((M, y), "ORDEN DEL DÍA", font=font(40, True), fill=ACCENT_SOFT)
+    d.text((M, y), kicker, font=font(40, True), fill=soft)
     y += 90
     if doc.get("session_number"):
-        d.text((M, y), "Sesión", font=font(84, True), fill="white")
+        d.text((M, y), session_word(doc), font=font(84, True), fill="white")
         d.text((M, y + 100), f"N° {doc['session_number']}", font=font(170, True), fill="white")
         y += 330
     else:
@@ -346,29 +371,27 @@ def cover(doc, n_selected):
         y += 140
     d.text((M, y), date_long(doc.get("date")), font=font(52), fill="white")
     y += 120
-    d.line((M, y, M + 140, y), fill=ACCENT_SOFT, width=6)
+    d.line((M, y, M + 140, y), fill=soft, width=6)
     y += 50
     sub_font, sub_lines, lh = fit_text(d, "Concejo Deliberante de San Martín de los Andes", W - 2 * M, 200, sizes=(40,))
-    draw_lines(d, (M, y), sub_lines, sub_font, lh, ACCENT_SOFT)
-    teaser = (f"Lo más importante en {n_selected} punto{'s' if n_selected != 1 else ''}  →" if n_selected
-              else "Sin temas de alcance general en esta sesión")
-    d.text((M, H - 150), teaser, font=font(40, True), fill="white")
+    draw_lines(d, (M, y), sub_lines, sub_font, lh, soft)
+    if teaser is None:
+        teaser = (f"Lo más importante en {n_selected} punto{'s' if n_selected != 1 else ''}  →" if n_selected
+                  else "Sin temas de alcance general en esta sesión")
+    d.text((M, H - (210 if n_more else 150)), teaser, font=font(40, True), fill="white")
+    if n_more:
+        d.text((M, H - 150), y_mas(n_more), font=font(36), fill=soft)
     return img
 
 
 def item_slide(doc, item, simple, pos, n_selected, page, total):
-    img = Image.new("RGB", (W, H), BG)
-    d = ImageDraw.Draw(img)
-    brand_bar(d, ACCENT, session_title(doc), MUTED)
-    d.line((M, 130, W - M, 130), fill=LINE, width=2)
-
     action = split_action(item.get("que_dice"))[0]
     official = official_text(item)
     kicker = f"{action.upper()} · PUNTO {pos} DE {n_selected}" if action else f"PUNTO {pos} DE {n_selected}"
     tags = (item.get("impact_tags") or [])[:2]
     impact_msg = IMPACT_MESSAGES.get(tags[0], "") if tags else "Informativo: sin impacto directo claro (puede ser interno o administrativo)."
 
-    # Bloques de arriba a abajo; se miden primero y se centran en el alto libre (sin hueco fijo abajo).
+    d = MEASURE
     width = W - 2 * M
     blocks = [("text", [kicker], font(32, True), 44, ACCENT, 36)]  # (tipo, líneas, fuente, alto de línea, color, espacio después)
     if simple:
@@ -381,11 +404,26 @@ def item_slide(doc, item, simple, pos, n_selected, page, total):
     else:
         f, ls, lh = fit_text(d, official, width, 660, sizes=(84, 76, 68, 60, 56, 52, 48, 44, 40, 36))
         blocks.append(("text", ls, f, lh, INK, 48))
-    blocks.append(("rule", None, None, 2, LINE, 40))
-    if tags:
-        blocks.append(("chips", tags, None, 56, None, 28))
-    f, ls, lh = fit_text(d, impact_msg, width, 140, sizes=(38, 34, 30))
-    blocks.append(("text", ls, f, lh, MUTED, 0))
+    blocks += impact_blocks(tags, impact_msg)
+    ref = f"Ref. {item.get('expediente') or item.get('key')}" if item.get("expediente") or item.get("key") else ""
+    return content_slide(session_title(doc), blocks, ref, f"{page}/{total}")
+
+
+MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))  # solo para medir texto antes de dibujar
+
+
+def impact_blocks(tags, impact_msg):
+    f, ls, lh = fit_text(MEASURE, impact_msg, W - 2 * M, 140, sizes=(38, 34, 30))
+    return [("rule", None, None, 2, LINE, 40)] + ([("chips", tags, None, 56, None, 28)] if tags else []) + [("text", ls, f, lh, MUTED, 0)]
+
+
+def content_slide(header, blocks, footer_left, page_txt, accent=ACCENT):
+    """Placa clara. blocks: (tipo, líneas, fuente, alto de línea, color, espacio después), de arriba a abajo;
+    se miden primero y se centran en el alto libre (sin hueco fijo abajo)."""
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    brand_bar(d, accent, header, MUTED)
+    d.line((M, 130, W - M, 130), fill=LINE, width=2)
 
     def height(b):
         kind, lines, _, lh, _, gap = b
@@ -407,22 +445,22 @@ def item_slide(doc, item, simple, pos, n_selected, page, total):
         y += gap
 
     footer_font = font(28)
-    if item.get("expediente") or item.get("key"):
-        d.text((M, H - 100), f"Ref. {item.get('expediente') or item.get('key')}", font=footer_font, fill=MUTED)
-    page_txt = f"{page}/{total}"
+    if footer_left:
+        d.text((M, H - 100), footer_left, font=footer_font, fill=MUTED)
     d.text((W - M - d.textlength(page_txt, font=footer_font), H - 100), page_txt, font=footer_font, fill=MUTED)
     return img
 
 
-def closing():
-    img = Image.new("RGB", (W, H), ACCENT)
+def closing(colors=(ACCENT, ACCENT_SOFT)):
+    accent, soft = colors
+    img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
     brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=ACCENT_SOFT, width=2)
-    d.text((M, 430), "¿Querés saber más?", font=font(56), fill=ACCENT_SOFT)
+    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    d.text((M, 430), "¿Querés saber más?", font=font(56), fill=soft)
     title_font = font(100, True)
     y = draw_lines(d, (M, 530), ["Más info:", "link en la bio"], title_font, 132, "white")
-    d.line((M, y + 50, M + 140, y + 50), fill=ACCENT_SOFT, width=6)
+    d.line((M, y + 50, M + 140, y + 50), fill=soft, width=6)
     sub_font, sub_lines, sub_lh = fit_text(d, "Resúmenes claros y buscables de cada sesión del Concejo Deliberante de San Martín de los Andes.",
                                           W - 2 * M, 200, sizes=(40, 36))
     draw_lines(d, (M, y + 110), sub_lines, sub_font, sub_lh, "white")
@@ -439,18 +477,173 @@ def render_carousel(doc, out_dir, prefix="slide", simple_lines=None, ext="png"):
         simple_lines, error = criollo_lines(items)
         if error:
             print(f"Aviso: {error}")
-    slides = [cover(doc, len(items))]
+    slides = [cover(doc, len(items), more_count(doc, items))]
     total = len(items) + 2
     slides += [item_slide(doc, it, simple, i, len(items), i + 1, total)
                for i, (it, simple) in enumerate(zip(items, simple_lines), start=1)]
     slides.append(closing())
+    return save_slides(slides, out, prefix, ext, build_caption(doc, items))
+
+
+def save_slides(slides, out, prefix, ext, caption):
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, img in enumerate(slides, start=1):
         p = out / f"{prefix}-{i:02d}.{ext}"
         img.save(p, quality=90, optimize=True)  # quality solo aplica a JPEG (Instagram solo acepta JPEG)
         paths.append(p)
-    (out / "caption.txt").write_text(build_caption(doc, items), encoding="utf-8")
+    (out / "caption.txt").write_text(caption, encoding="utf-8")
     return paths
+
+
+# ------------------------------------------------------------------ notas de Prensa: "Qué se aprobó" y destacados
+NOTE_SYSTEM = (
+    "Resumís notas de prensa del Concejo Deliberante de San Martín de los Andes para vecinos sin formación legal. "
+    "Devolvé una sola oración de hasta 25 palabras, en español rioplatense simple, que diga qué aprobó el Concejo y a "
+    "quién afecta. Podés decir 'se aprobó' o 'el Concejo aprobó': la nota lo confirma. Escribí con tus palabras, sin "
+    "copiar frases de la nota. Usá solo datos que estén en la nota: no inventes montos, fechas ni plazos. Si la nota "
+    "cuenta varios temas, resumí el principal. No nombres a personas particulares (usá 'un vecino' o 'una vecina'). "
+    "Sin comillas, sin emojis y sin prefijos."
+)
+DESTACADO_SYSTEM = (
+    "Explicás a vecinos de San Martín de los Andes una norma que aprobó el Concejo Deliberante, a partir de una nota "
+    "de prensa. Completá: titular (hasta 10 palabras), que_cambia, a_quien_afecta y desde_cuando (una oración corta "
+    "cada uno), en español rioplatense simple y con tus palabras, sin copiar frases de la nota. Usá SOLO datos que "
+    "estén en la nota (montos, porcentajes, plazos, alcance). Si la nota no informa alguno de los tres, dejalo vacío "
+    "(\"\"): nunca lo deduzcas ni lo inventes. No nombres a personas particulares. Sin emojis."
+)
+DESTACADO_FIELDS = ("titular", "que_cambia", "a_quien_afecta", "desde_cuando")
+DESTACADO_FORMAT = {"format": {"type": "json_schema", "schema": {
+    "type": "object", "properties": {k: {"type": "string"} for k in DESTACADO_FIELDS},
+    "required": list(DESTACADO_FIELDS), "additionalProperties": False}}}
+QUESTIONS = (("que_cambia", "¿Qué cambia?"), ("a_quien_afecta", "¿A quién afecta?"), ("desde_cuando", "¿Desde cuándo?"))
+NO_INFO = "La nota no lo informa."
+
+
+def numbers(text):
+    return {re.sub(r"[.,]", "", n) for n in re.findall(r"\d[\d.,]*\d|\d", text or "")}
+
+
+def only_note_numbers(out, note):
+    """El texto generado no puede traer cifras (montos, porcentajes, fechas) que no estén en la nota."""
+    # shortcut: compara cifras sueltas, no su sentido ("50%" pasa si la nota cita el "Artículo 50"); la revisión
+    # por Issue del período de prueba es el control de fondo. Mejorar si aparece un caso real.
+    return numbers(out) <= numbers(note)
+
+
+def note_line(note):
+    """Línea "En criollo" de una nota, o None si la respuesta no sirve. Lanza anthropic.APIError si la API falla."""
+    out = _complete(NOTE_SYSTEM, note)
+    out = anonymize(re.sub(r"^En criollo:\s*", "", out or "", flags=re.I).strip("\"“”' "))
+    if not out or not only_note_numbers(out, note):
+        return None
+    return shorten(out, 260)
+
+
+def note_lines(notes):
+    """Como criollo_lines, para textos de notas: (líneas, error). Sin línea, la nota no entra en el carrusel."""
+    if not api_key():
+        return [None] * len(notes), "Falta ANTHROPIC_API_KEY."
+    try:
+        return [note_line(n) for n in notes], None
+    except anthropic.APIError as e:
+        return [None] * len(notes), f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
+
+
+def destacado_fields(note):
+    """{titular, que_cambia, a_quien_afecta, desde_cuando} o None si no hay titular usable. Un campo vacío o con cifras
+    que no están en la nota queda vacío ("la nota no lo informa"). Lanza anthropic.APIError si la API falla."""
+    out = _complete(DESTACADO_SYSTEM, note, DESTACADO_FORMAT)
+    try:
+        data = json.loads(out or "")
+    except ValueError:
+        return None
+    fields = {k: anonymize(str(data.get(k) or "").strip()) for k in DESTACADO_FIELDS}
+    fields = {k: v if v and only_note_numbers(v, note) else "" for k, v in fields.items()}
+    return fields if fields["titular"] else None
+
+
+def destacado(note):
+    """(campos, error) como note_lines: error es un texto para avisar, sin datos sensibles, o None."""
+    if not api_key():
+        return None, "Falta ANTHROPIC_API_KEY."
+    try:
+        return destacado_fields(note), None
+    except anthropic.APIError as e:
+        return None, f"La API de Anthropic falló ({type(e).__name__}): {getattr(e, 'message', '')[:300]}"
+
+
+def note_slide(sdoc, note, pos, n, page, total):
+    tags = (note.get("impact_tags") or [])[:2]
+    impact_msg = IMPACT_MESSAGES.get(tags[0], "") if tags else "Aprobado por el Concejo Deliberante."
+    f, ls, lh = fit_text(MEASURE, note["line"], W - 2 * M, 560, sizes=(72, 66, 60, 56, 52, 48, 44), bold=True)
+    blocks = [("text", [f"APROBADO · {pos} DE {n}"], font(32, True), 44, APROBADO[0], 36),
+              ("text", ["En criollo:"], font(36, True), 48, APROBADO[0], 8),
+              ("text", ls, f, lh, INK, 44)] + impact_blocks(tags, impact_msg)
+    return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", APROBADO[0])
+
+
+def aprobado_caption(sdoc, notes):
+    head = " · ".join(["✅ Qué se aprobó", session_title(sdoc), date_long(sdoc.get("date"))])
+    lines = [head, "", "Lo que aprobó el Concejo Deliberante de San Martín de los Andes en esta sesión, según las notas de Prensa:", ""]
+    lines += [f"• {n['line']}" for n in notes]
+    lines += ["", "Deslizá para ver el detalle 👉", FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    return "\n".join(lines)
+
+
+def render_aprobado(sdoc, notes, out_dir, prefix="aprobado", ext="png"):
+    """Carrusel "Qué se aprobó". notes: dicts con line (ya generada) e impact_tags, ya ordenados (máximo MAX_ITEMS)."""
+    notes = notes[:MAX_ITEMS]
+    total = len(notes) + 2
+    teaser = f"Lo aprobado en {len(notes)} tema{'s' if len(notes) != 1 else ''}  →"
+    slides = [cover(sdoc, len(notes), kicker="QUÉ SE APROBÓ", colors=APROBADO, teaser=teaser)]
+    slides += [note_slide(sdoc, n, i, len(notes), i + 1, total) for i, n in enumerate(notes, start=1)]
+    slides.append(closing(APROBADO))
+    return save_slides(slides, out_dir, prefix, ext, aprobado_caption(sdoc, notes))
+
+
+def destacado_cover(sdoc, fields, tags):
+    accent, soft = DESTACADO
+    img = Image.new("RGB", (W, H), accent)
+    d = ImageDraw.Draw(img)
+    brand_bar(d, "white")
+    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    d.text((M, 300), "DESTACADO", font=font(40, True), fill=soft)
+    f, ls, lh = fit_text(d, fields["titular"], W - 2 * M, 520, sizes=(96, 88, 80, 72, 64, 56), bold=True)
+    y = draw_lines(d, (M, 390), ls, f, lh, "white") + 50
+    d.line((M, y, M + 140, y), fill=soft, width=6)
+    sub = f"Aprobado en la {session_title(sdoc)} del {date_long(sdoc.get('date'))}"
+    f, ls, lh = fit_text(d, sub, W - 2 * M, 120, sizes=(40, 36))
+    draw_lines(d, (M, y + 50), ls, f, lh, soft)
+    x = M
+    for t in tags[:2]:
+        x = chip(d, x, H - 290, strip_emoji(t), "#4A2606")  # los colores de etiqueta se pierden sobre el naranja
+    d.text((M, H - 150), "Qué cambia, a quién afecta y desde cuándo  →", font=font(36, True), fill="white")
+    return img
+
+
+def destacado_slide(sdoc, fields):
+    blocks = []
+    for key, question in QUESTIONS:
+        answer = fields[key] or NO_INFO
+        f, ls, lh = fit_text(MEASURE, answer, W - 2 * M, 260, sizes=(52, 48, 44, 40, 36, 32), bold=bool(fields[key]))
+        blocks += [("text", [question], font(36, True), 48, DESTACADO[0], 10), ("text", ls, f, lh, INK if fields[key] else MUTED, 56)]
+    return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", "2/2", DESTACADO[0])
+
+
+def destacado_caption(sdoc, fields):
+    lines = [f"📌 Destacado: {fields['titular']}", ""]
+    lines += [f"{q} {fields[k] or NO_INFO}" for k, q in QUESTIONS]
+    lines += ["", f"Aprobado por el Concejo Deliberante en la {session_title(sdoc)} ({date_long(sdoc.get('date'))}).",
+              FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    return "\n".join(lines)
+
+
+def render_destacado(sdoc, fields, tags, out_dir, prefix="destacado", ext="png"):
+    """Dos placas (la API de Instagram publica un carrusel con 2 o más imágenes; así se reusa el mismo circuito)."""
+    slides = [destacado_cover(sdoc, fields, tags), destacado_slide(sdoc, fields)]
+    return save_slides(slides, out_dir, prefix, ext, destacado_caption(sdoc, fields))
 
 
 def load_doc(path):

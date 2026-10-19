@@ -1,0 +1,167 @@
+import json
+import os
+import tempfile
+import unittest
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from PIL import Image
+
+import instagram_carousel as ic
+import prensa
+from test_instagram import DOC
+
+# Notas reales de https://prensacd.cdsma.gob.ar/prensa/ (API de WordPress), tal como las guarda prensa.fetch().
+NOTAS = json.loads(Path(__file__).with_name("tests").joinpath("prensa_notas.json").read_text(encoding="utf-8"))
+
+
+def key_of(note_id):
+    s = prensa.session_of(NOTAS[str(note_id)])
+    return s and s["key"]
+
+
+class SesionTest(unittest.TestCase):
+    def test_aprobadas_con_cada_verbo(self):
+        casos = {
+            1508: "2026-O18",  # "aprobó, en la 18ª Sesión Ordinaria"
+            1857: "2026-O18",  # "fue declarado" (publicada en octubre, aprobada en agosto)
+            1818: "2026-O23",  # "distinguió" / "otorgó la Distinción al Mérito"
+            1815: "2026-O23",  # "fue declarada de interés municipal"
+            1753: "2026-O22",  # "La declaración fue aprobada durante la 22ª"
+            1777: "2026-O22",  # "exime del 70%"
+            1782: "2026-O22",  # "Lo hizo el jueves 1 de octubre … durante la 22ª": el verbo está en el título
+            1758: "2026-O22",
+        }
+        for note_id, key in casos.items():
+            self.assertEqual(key_of(note_id), key, NOTAS[str(note_id)]["title"])
+
+    def test_excluidas(self):
+        for note_id in (1351,   # "tratará, durante la 17ª" (el título dice "declaró")
+                        1552,   # "rechazó" en la Sesión Especial N.° 1
+                        1621,   # Concejo Deliberante Estudiantil
+                        1763,   # audiencia pública
+                        1556):  # convocatoria a audiencia pública
+            self.assertIsNone(key_of(note_id), NOTAS[str(note_id)]["title"])
+
+    def test_formatos_de_sesion(self):
+        base = {"id": 1, "date": "2026-09-04T10:00:00", "title": "Nota"}
+        casos = {
+            "aprobó, en la Sesión Especial N.° 1 del año 2026 realizada este jueves 3 de septiembre, una ordenanza": ("2026-E1", date(2026, 9, 3)),
+            "aprobó, durante la Sesión Ordinaria N°20 , realizada el jueves 10 de septiembre, la adhesión": ("2026-O20", date(2026, 9, 10)),
+            "autorizó durante la 3º Sesión Ordinaria del año 2025 la venta": ("2025-O3", None),
+        }
+        for texto, (key, d) in casos.items():
+            s = prensa.session_of({**base, "text": texto})
+            self.assertEqual((s["key"], s["date"]), (key, d), texto)
+
+    def test_fecha_de_la_sesion_sale_de_cualquier_nota(self):
+        s = prensa.sessions(NOTAS)
+        self.assertEqual(s["2026-O18"]["date"], date(2026, 8, 27))  # la nota de la tasa no la dice; la del Plan de Deudas sí
+        self.assertEqual(s["2026-O23"]["date"], date(2026, 10, 8))
+
+    def test_destacados_y_orden(self):
+        s = prensa.sessions(NOTAS)
+        ids = [n["id"] for n in prensa.rank(s["2026-O18"]["notes"])]
+        self.assertEqual(ids[:2], [1508, 1482])  # tasa comercial y plan de deudas: Bolsillo, alcance general
+        destacados = {n["id"] for ss in s.values() for n in ss["notes"] if prensa.is_destacado(n)}
+        self.assertTrue({1508, 1482, 1777} <= destacados)
+        self.assertFalse({1818, 1815, 1857, 1758} & destacados)  # distinciones y declaraciones de interés
+
+    def test_educacion(self):
+        self.assertIn("📚 Educación", prensa.impact_tags(NOTAS["1758"]))  # robótica de las EPET 12 y 30
+
+    def test_texto_para_claude_anonimizado(self):
+        texto = prensa.note_text({"title": "Pedido", "text": "Solicitud del Sr. David Figueroa de baja"})
+        self.assertNotIn("Figueroa", texto)
+
+
+def respuesta(texto):
+    return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=texto)])
+
+
+class ClaudeNotasTest(unittest.TestCase):
+    def setUp(self):
+        for p in (mock.patch.object(ic, "DOTENV", ic.Path(tempfile.gettempdir()) / "no-existe-actas-sma.env"),
+                  mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.nota = prensa.note_text(NOTAS["1508"])
+
+    def cliente(self, texto):
+        create = mock.Mock(return_value=respuesta(texto))
+        return mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=create))), create
+
+    def test_cifras_que_no_estan_en_la_nota(self):
+        self.assertTrue(ic.only_note_numbers("Baja un 35% y el punto queda en $4.440 hasta diciembre de 2026.", self.nota))
+        self.assertFalse(ic.only_note_numbers("Baja un 40% la tasa comercial.", self.nota))
+
+    def test_linea_con_cifra_inventada_se_descarta(self):
+        patch, _ = self.cliente("El Concejo aprobó bajar un 40% la tasa comercial.")
+        with patch:
+            self.assertIsNone(ic.note_line(self.nota))
+        patch, _ = self.cliente("El Concejo aprobó bajar un 35% la tasa comercial hasta fin de año.")
+        with patch:
+            self.assertEqual(ic.note_line(self.nota), "El Concejo aprobó bajar un 35% la tasa comercial hasta fin de año.")
+
+    def test_destacado_no_inventa(self):
+        datos = {"titular": "Baja la tasa comercial", "que_cambia": "La tasa comercial baja un 35%.",
+                 "a_quien_afecta": "Comercios del Sr. Juan Pérez", "desde_cuando": "Desde marzo de 2031."}
+        patch, create = self.cliente(json.dumps(datos))
+        with patch:
+            campos = ic.destacado_fields(self.nota)
+        self.assertEqual(campos["que_cambia"], "La tasa comercial baja un 35%.")
+        self.assertEqual(campos["a_quien_afecta"], "Comercios de un vecino")
+        self.assertEqual(campos["desde_cuando"], "")  # 2031 no está en la nota: "la nota no lo informa"
+        self.assertEqual(create.call_args.kwargs["output_config"]["format"]["type"], "json_schema")
+
+    def test_destacado_sin_titular_no_sale(self):
+        patch, _ = self.cliente(json.dumps({"titular": "", "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}))
+        with patch:
+            self.assertIsNone(ic.destacado_fields(self.nota))
+
+
+class PlacasTest(unittest.TestCase):
+    def setUp(self):
+        self.s = prensa.sessions(NOTAS)["2026-O18"]
+        self.sdoc = prensa.session_doc(self.s)
+
+    def test_que_se_aprobo(self):
+        notas = [{**n, "line": "El Concejo aprobó un alivio para los comercios."} for n in prensa.rank(self.s["notes"])]
+        with tempfile.TemporaryDirectory() as out:
+            paths = ic.render_aprobado(self.sdoc, notas, out, ext="jpg")
+            caption = (Path(out) / "caption.txt").read_text(encoding="utf-8")
+            sizes = []
+            for p in paths:
+                with Image.open(p) as img:
+                    sizes.append(img.size)
+        self.assertEqual(len(paths), len(notas) + 2)
+        self.assertEqual(set(sizes), {(1080, 1350)})
+        self.assertTrue(caption.startswith("✅ Qué se aprobó · Sesión N° 18 · 27 de agosto de 2026"))
+        self.assertIn(ic.FUENTE, caption)
+        self.assertLessEqual(len(caption), 2200)
+
+    def test_maximo_8_placas(self):
+        notas = [{"line": f"Tema {i}", "impact_tags": []} for i in range(12)]
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(len(ic.render_aprobado(self.sdoc, notas, out)), 10)  # portada + 8 + cierre
+
+    def test_destacado(self):
+        campos = {"titular": "Baja la tasa comercial", "que_cambia": "La tasa baja un 35%.", "a_quien_afecta": "", "desde_cuando": ""}
+        with tempfile.TemporaryDirectory() as out:
+            paths = ic.render_destacado(self.sdoc, campos, ["💰 Bolsillo"], out)
+            caption = (Path(out) / "caption.txt").read_text(encoding="utf-8")
+        self.assertEqual(len(paths), 2)
+        self.assertIn("¿A quién afecta? La nota no lo informa.", caption)
+        self.assertIn(ic.FUENTE, caption)
+
+    def test_orden_del_dia_cierra_con_y_n_temas_mas(self):
+        items = ic.select_items(DOC)
+        self.assertEqual(ic.more_count(DOC, items), 3)
+        self.assertIn("…y 3 temas más.", ic.build_caption(DOC, items))
+        self.assertEqual(ic.y_mas(1), "y 1 tema más")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -3,8 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       orden:
-        description: "Número de orden del día (por ejemplo 23)"
+        description: "Número de sesión (por ejemplo 23; E1 = Sesión Especial 1, solo para Prensa)"
         required: true
+      tipo:
+        description: "Tipo de post"
+        type: choice
+        options: [orden-del-dia, que-se-aprobo, destacado]
+        default: orden-del-dia
       anio:
         description: "Año (vacío = el actual)"
         required: false
@@ -26,7 +31,7 @@ jobs:
       - name: Install deps
         run: |
           pip install -r requirements.txt
-      # Abre un Issue con la vista previa y la verificación del token (solo consulta /me); no publica ni toca el estado.
+      # Abre un Issue (uno por nota en "destacado") con la vista previa y la verificación del token (solo consulta /me); no publica ni toca el estado.
       - name: Vista previa
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -37,5 +42,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ORDEN: ${{ inputs.orden }}
           ANIO: ${{ inputs.anio }}
+          TIPO: ${{ inputs.tipo }}
         run: |
-          python instagram_publisher.py --prueba "$ORDEN" ${ANIO:+--anio "$ANIO"}
+          python instagram_publisher.py --prueba "$ORDEN" --tipo "$TIPO" ${ANIO:+--anio "$ANIO"}

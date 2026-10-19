@@ -294,13 +294,14 @@ def classify_topics(text):
 
 
 IMPACT_RULES = [
-    ("💰 Bolsillo", ["tarifa", "tasa", "impuesto", "tribut", "arancel", "reajuste", "actualización", "módulo", "valor"]),
+    ("💰 Bolsillo", ["tarifa", "tasa", "impuesto", "tribut", "arancel", "reajuste", "actualización", "módulo", "valor", "exención", "exime", "deuda"]),
     ("🏗 Infraestructura", ["obra", "licitación", "contratación", "pavimento", "asfalto", "vereda", "plaza", "puente"]),
     ("🚦 Tránsito/Seguridad", ["tránsito", "circulación", "corte", "estacionamiento", "control", "inspección", "alcoholemia", "seguridad"]),
     ("🚰 Servicios", ["agua", "cloaca", "gas", "energía", "luz", "residuos", "basura", "saneamiento"]),
     ("🏪 Comercio", ["habilitación", "comercio", "local comercial", "feria", "gastronomía", "licencia comercial"]),
     ("🏘 Urbanismo", ["lote", "loteo", "urban", "zonificación", "catastro", "edificación", "vivienda", "medianera", "retiro de frente"]),
     ("🌿 Ambiente", ["ambiente", "bosque", "incendio", "impacto", "contaminación", "reserva"]),
+    ("📚 Educación", ["escuela", "alumno", "estudiante", "educativ", "educación", "epet", "cpem", "jardín de infantes"]),
     ("🎭 Cultura/Eventos", ["jornadas", "congreso", "evento", "festival", "encuentro", "capacitación", "conferencia", "interés municipal", "interés cultural"]),
 ]
 
@@ -313,6 +314,7 @@ IMPACT_MESSAGES = {
     "🏪 Comercio": "Puede afectar habilitaciones o comercios.",
     "🏘 Urbanismo": "Puede afectar loteos, zonificación o desarrollo urbano.",
     "🌿 Ambiente": "Puede afectar regulaciones ambientales o áreas naturales.",
+    "📚 Educación": "Puede afectar escuelas, alumnos o programas educativos.",
     "🎭 Cultura/Eventos": "Declaración de interés o apoyo a evento/actividad cultural.",
 }
 

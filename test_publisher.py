@@ -7,6 +7,7 @@ from unittest import mock
 
 import instagram_carousel as ic
 import instagram_publisher as pub
+import prensa
 
 TOKEN = "IGTOKEN-secreto-de-prueba"
 T0 = datetime(2026, 10, 18, 10, 5, tzinfo=timezone.utc)
@@ -17,6 +18,20 @@ GENERAL = {"session_number": "23", "session_year": 2026, "date": "08/10/2026", "
 SIN_GENERALES = {"session_number": "24", "session_year": 2026, "date": "15/10/2026", "items": [
     {"key": "1", "que_dice": "Declaración de Interés Municipal la Peña", "title": "Declaración de Interés Municipal la Peña",
      "impact_tags": ["🎭 Cultura/Eventos"]}]}
+
+
+def nota(note_id, n, dia, titulo, verbo="aprobó"):
+    """Nota de Prensa de la sesión n, realizada el día `dia` de octubre de 2026 y publicada ese mismo día."""
+    texto = (f"El Concejo Deliberante de San Martín de los Andes {verbo}, durante la {n}ª Sesión Ordinaria del año 2026, "
+             f"realizada el jueves {dia} de octubre, {titulo.lower()}. La norma rige desde enero de 2027.")
+    return {"id": note_id, "date": f"2026-10-{dia:02d}T12:00:00", "modified": f"2026-10-{dia:02d}T12:00:00",
+            "link": f"https://prensacd.cdsma.gob.ar/{note_id}/", "title": titulo, "text": texto}
+
+
+TASA = "Una reducción del 35% en la tasa comercial"
+INTERES = "La declaración de interés municipal de la Peña del Club Lácar"
+CAMPOS = {"titular": "Baja la tasa comercial", "que_cambia": "Se reduce un 35% la tasa comercial.",
+          "a_quien_afecta": "A los comercios.", "desde_cuando": ""}
 
 
 def rec(doc_id, n):
@@ -94,6 +109,7 @@ class PublisherTest(unittest.TestCase):
         self.hf = {}
         self.index = [rec("viejo1", 21), rec("viejo2", 22)]
         self.docs = {"viejo1": GENERAL, "viejo2": GENERAL}
+        self.notes = {"1": nota(1, 23, 8, INTERES)}  # sesión anterior a la primera corrida
         self.gh, self.ig, self.clock = FakeGitHub(), FakeIG(), [T0]
         self.refreshes = []
         tmp = tempfile.mkdtemp()
@@ -111,6 +127,9 @@ class PublisherTest(unittest.TestCase):
             mock.patch.object(pub, "now", lambda: self.clock[0]),
             mock.patch.object(pub.time, "sleep", lambda s: None),
             mock.patch.object(ic, "criollo_lines", lambda items: ([None] * len(items), None)),
+            mock.patch.object(ic, "note_lines", lambda notes: (["El Concejo aprobó algo."] * len(notes), None)),
+            mock.patch.object(ic, "destacado", lambda note: (dict(CAMPOS), None)),
+            mock.patch.object(prensa, "load_notes", lambda save=True: self.notes),
             mock.patch.object(pub, "_token", None),
             mock.patch("builtins.print"),
         ]
@@ -151,7 +170,7 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("Sesión N° 23", issue["title"])
         self.assertIn("no-publicar", issue["body"])
         self.assertIn("![Placa 1](https://raw/", issue["body"])
-        self.assertIn("19/10 a las 10:00 UTC (07:00 en Argentina)", issue["body"])
+        self.assertIn("19/10 a las 10:17 UTC (07:17 en Argentina)", issue["body"])
         self.assertIn("nuevo", self.state["pending"])
         self.assertEqual(self.ig.published(), [])
 
@@ -258,6 +277,71 @@ class PublisherTest(unittest.TestCase):
         self.nueva_orden()
         self.run_pub(1)
 
+    # --- Prensa
+    def nueva_nota(self, note_id, n, dia, titulo):
+        self.notes[str(note_id)] = nota(note_id, n, dia, titulo)
+
+    def test_prensa_primera_vez_no_publica_sesiones_anteriores(self):
+        self.run_pub()
+        self.run_pub(1)
+        self.assertEqual(self.state["prensa_since"], "2026-10-18")
+        self.nueva_nota(2, 23, 8, TASA)  # nota nueva de una sesión anterior: tampoco
+        self.run_pub(24 * 10)
+        self.assertEqual(self.gh.issues, {})
+
+    def test_destacado_sale_enseguida_y_el_resumen_a_los_7_dias(self):
+        self.run_pub()
+        self.run_pub(1)
+        self.nueva_nota(10, 25, 22, TASA)
+        self.nueva_nota(11, 25, 22, INTERES)
+        self.clock[0] = T0
+        self.run_pub(24 * 4 + 1)  # 22/10: hay sesión nueva con una nota de Bolsillo
+        [destacado] = self.gh.by_label("instagram-vista-previa")
+        self.assertIn("Destacado · Baja la tasa comercial", destacado["title"])
+        self.assertIn("¿Desde cuándo? La nota no lo informa.", destacado["body"])
+        self.assertIn("Fuente: Prensa del Concejo Deliberante (prensacd.cdsma.gob.ar)", destacado["body"])
+        self.run_pub(24 * 10 + 1)  # 28/10: todavía no pasaron 7 días
+        self.assertFalse([i for i in self.gh.issues.values() if "Qué se aprobó" in i["title"]])
+        self.run_pub(24 * 11 + 1)  # 29/10
+        [resumen] = [i for i in self.gh.issues.values() if "Qué se aprobó" in i["title"]]
+        self.assertIn("Sesión N° 25 (22 de octubre de 2026)", resumen["title"])
+        self.assertIn("![Placa 4]", resumen["body"])  # portada + 2 notas + cierre
+        self.run_pub(24 * 12 + 1)
+        self.assertEqual(len(self.gh.by_label("instagram-vista-previa")), 2)  # sin duplicados
+        self.assertEqual(len(self.ig.published()), 2)  # cada uno, en la corrida siguiente a su Issue
+
+    def test_periodo_de_prueba_por_tipo(self):
+        self.run_pub()
+        self.run_pub(1)
+        for i in range(3):
+            self.nueva_nota(20 + i, 30 + i, 19, f"{TASA} número {i}")
+            self.run_pub(24 * (i + 1) + 1)
+        self.run_pub(24 * 5)
+        self.assertEqual(pub.counters(self.state, "destacado"), {"approved": 3, "mode": "direct"})
+        self.assertEqual((self.state["approved"], self.state["mode"]), (0, "review"))  # el de órdenes del día no cambia
+        self.nueva_orden()
+        self.run_pub(24 * 6)
+        self.assertIn("nuevo", self.state["pending"])  # la orden del día sigue con vista previa
+
+    def test_si_falla_anthropic_no_publica_placas_vacias_y_reintenta(self):
+        self.run_pub()
+        self.run_pub(1)
+        self.nueva_nota(30, 25, 22, TASA)
+        with mock.patch.object(ic, "destacado", lambda note: (None, "La API de Anthropic falló (APIConnectionError): ")):
+            self.assertEqual(self.run_pub(24 * 4 + 1), 1)
+        self.assertEqual(self.gh.by_label("instagram-vista-previa"), [])
+        [err] = self.gh.by_label("instagram-error")
+        self.assertEqual(err["title"], pub.ERROR_TITLES["anthropic"])
+        self.run_pub(24 * 5 + 1)
+        self.assertEqual(len(self.gh.by_label("instagram-vista-previa")), 1)
+
+    def test_si_el_sitio_de_prensa_falla_avisa(self):
+        self.run_pub()
+        with mock.patch.object(prensa, "load_notes", mock.Mock(side_effect=pub.requests.ConnectionError())):
+            self.assertEqual(self.run_pub(1), 1)
+        [err] = self.gh.by_label("instagram-error")
+        self.assertEqual(err["title"], pub.ERROR_TITLES["prensa"])
+
     # --- token
     def test_token_se_renueva_cuando_faltan_menos_de_15_dias(self):
         self.hf[pub.TOKEN_PATH]["expires_at"] = pub.iso(T0 + timedelta(days=10))
@@ -348,6 +432,21 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("❌ Falta el secret `IG_ACCESS_TOKEN`.", issue["body"])
         self.assertEqual(self.ig.calls, [])
+
+    def test_prueba_que_se_aprobo_y_destacado(self):
+        self.notes["2"] = nota(2, 23, 8, TASA)
+        self.assertEqual(pub.run_preview("23", 2026, "que-se-aprobo"), 0)
+        self.assertEqual(pub.run_preview("23", 2026, "destacado"), 0)
+        titles = [i["title"] for i in self.gh.by_label("instagram-prueba")]
+        self.assertEqual(titles, ["PRUEBA Instagram: Qué se aprobó · Sesión N° 23 (8 de octubre de 2026)",
+                                  "PRUEBA Instagram: Destacado · Baja la tasa comercial"])
+        self.assertNotIn(pub.STATE_PATH, self.hf)
+        self.assertEqual(self.ig.published(), [])
+
+    def test_prueba_destacado_sin_notas_destacables(self):
+        pub.run_preview("23", 2026, "destacado")
+        [issue] = self.gh.by_label("instagram-prueba")
+        self.assertIn("no tiene notas aprobadas de Bolsillo", issue["body"])
 
     def test_prueba_con_ig_user_id_distinto(self):
         os.environ["IG_USER_ID"] = "999"

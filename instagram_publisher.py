@@ -1,8 +1,11 @@
-# Publica en Instagram cada orden del día nueva. Corre en el cron, después de auto_fetch.py.
+# Publica en Instagram cada orden del día nueva y, desde las notas de Prensa (prensa.py), el resumen "Qué se aprobó"
+# de cada sesión (7 días después de la sesión) y un "Destacado" por cada nota de Bolsillo, Servicios u Obras.
+# Corre en el cron, después de auto_fetch.py.
 #   python instagram_publisher.py                          # corrida normal
-#   python instagram_publisher.py --prueba 23 [--anio 2026]  # Issue de vista previa: no publica ni toca el estado
-# Período de prueba: cada orden nueva abre un Issue; si no tiene la etiqueta "no-publicar", la corrida diaria
-# siguiente la publica. Después de 3 publicaciones aprobadas así, pasa a publicar directo.
+#   python instagram_publisher.py --prueba 23 [--anio 2026] [--tipo que-se-aprobo]  # Issue de vista previa: no publica
+#                                                                                   # ni toca el estado
+# Período de prueba, por tipo de post: cada post nuevo abre un Issue; si no tiene la etiqueta "no-publicar", la corrida
+# diaria siguiente lo publica. Después de 3 publicaciones aprobadas así de ese tipo, ese tipo pasa a publicar directo.
 # Estado y token viven en el dataset privado de HF. Nunca se imprime ni se reporta un token.
 import argparse
 import base64
@@ -10,12 +13,13 @@ import sys
 import tempfile
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
 import instagram_carousel as ic
+import prensa
 from hf_dataset_store import DATASET_REPO_ID, load_index, load_json, load_processed_json, save_json
 
 STATE_PATH = "instagram/state.json"
@@ -26,18 +30,27 @@ IG_USERNAME = "concejo.sma"  # cuenta en la que se publica: la prueba verifica q
 REVIEW_APPROVALS = 3
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
 REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación
-CRON_HOUR_UTC = 10                   # igual que el schedule de auto-fetch.yml
+CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
+APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen las notas de la sesión
+TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado"}
+KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos",
+              "destacado": "los destacados nuevos"}
 LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5"}
 ERROR_TITLES = {
     "token": "Instagram: problema con el token",
     "publicacion": "Instagram: falló la publicación",
     "anthropic": "Instagram: falló la API de Anthropic",
+    "prensa": "Instagram: no se pudieron leer las notas de Prensa",
     "otro": "Instagram: error inesperado",
 }
 
 
 class PublishError(Exception):
     """Error con un mensaje apto para un Issue: nunca incluye tokens."""
+
+
+class AnthropicFailure(PublishError):
+    """Sin la API de Anthropic no hay texto para las placas de Prensa: no se publica y se reintenta mañana."""
 
 
 class IGError(PublishError):
@@ -274,27 +287,64 @@ def prepare(doc_id, folder):
     return doc, urls, caption
 
 
+def prepare_aprobado(s, folder):
+    """Carrusel "Qué se aprobó" de una sesión. Devuelve (título, urls, caption) o None si ninguna nota dio un resumen."""
+    sdoc = prensa.session_doc(s)
+    label = f"Qué se aprobó · {ic.session_title(sdoc)} ({ic.date_long(sdoc['date'])})"
+    notes = prensa.rank(s["notes"])[:ic.MAX_ITEMS]
+    lines, error = ic.note_lines([prensa.note_text(n) for n in notes])
+    if error:
+        raise AnthropicFailure(f"{error} No se generó '{label}'; se reintenta en la próxima corrida.")
+    picked = [{**n, "line": line} for n, line in zip(notes, lines) if line]
+    if not picked:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = ic.render_aprobado(sdoc, picked, tmp, ext="jpg")
+        caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        urls = upload_images(paths, folder)
+    return label, urls, caption
+
+
+def prepare_destacado(s, note, folder):
+    """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption) o None."""
+    sdoc = prensa.session_doc(s)
+    fields, error = ic.destacado(prensa.note_text(note))
+    if error:
+        raise AnthropicFailure(f"{error} No se generó el destacado de la nota {note['link']}; se reintenta en la próxima corrida.")
+    if not fields:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = ic.render_destacado(sdoc, fields, note["impact_tags"], tmp, ext="jpg")
+        caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        urls = upload_images(paths, folder)
+    return f"Destacado · {fields['titular']}", urls, caption
+
+
 def next_cron_run():
     t = now() + REVIEW_WAIT
-    run = t.replace(hour=CRON_HOUR_UTC, minute=0, second=0, microsecond=0)
+    run = t.replace(hour=CRON_TIME_UTC[0], minute=CRON_TIME_UTC[1], second=0, microsecond=0)
     return run if run > t else run + timedelta(days=1)
 
 
-def preview_title(doc, prueba=False):
-    return f"{'PRUEBA ' if prueba else 'Vista previa '}Instagram: {ic.session_title(doc)} ({ic.date_long(doc.get('date'))})"
+def od_label(doc):
+    return f"{ic.session_title(doc)} ({ic.date_long(doc.get('date'))})"
+
+
+def preview_title(label, prueba=False):
+    return f"{'PRUEBA ' if prueba else 'Vista previa '}Instagram: {label}"
 
 
 def preview_body(urls, caption, deadline=None, approved=None):
     if deadline is None:
         head = ["**PRUEBA: esta vista previa no se publica.**"]
     else:
-        when = f"{deadline:%d/%m} a las {deadline:%H}:00 UTC ({(deadline - timedelta(hours=3)):%H}:00 en Argentina)"
+        when = f"{deadline:%d/%m} a las {deadline:%H:%M} UTC ({(deadline - timedelta(hours=3)):%H:%M} en Argentina)"
         head = [f"Se publica en Instagram en la próxima corrida del cron: **{when}** (puede demorar unos minutos).", "",
                 "**Si no querés que se publique, poné la etiqueta `no-publicar`** (o cerrá este Issue) antes de esa hora."]
     body = head + ["", "### Placas", ""] + [f"![Placa {i}]({u})" for i, u in enumerate(urls, 1)]
     body += ["", "### Texto del post", "", "```text", caption.strip(), "```"]
     if approved is not None:
-        body += ["", f"Período de prueba: {approved} de {REVIEW_APPROVALS} publicaciones aprobadas antes de pasar a publicar directo."]
+        body += ["", f"Período de prueba: {approved} de {REVIEW_APPROVALS} publicaciones aprobadas de este tipo antes de pasar a publicar directo."]
     return "\n".join(body)
 
 
@@ -302,6 +352,25 @@ def preview_body(urls, caption, deadline=None, approved=None):
 
 def save_state(state, message):
     save_json(DATASET_REPO_ID, STATE_PATH, state, message)
+
+
+def counters(state, kind):
+    """Período de prueba de un tipo de post. El de las órdenes del día queda en la raíz del estado (como antes)."""
+    if kind == "od":
+        return state
+    return state.setdefault("review", {}).setdefault(kind, {"approved": 0, "mode": "review"})
+
+
+def enqueue(state, key, kind, label, urls, caption):
+    """Vista previa por Issue mientras el tipo está en período de prueba; después, publica directo."""
+    c = counters(state, kind)
+    if c["mode"] == "review":
+        number, url = create_issue(preview_title(label), preview_body(urls, caption, next_cron_run(), c["approved"]),
+                                   ["instagram-vista-previa"])
+        state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
+        print(f"{key}: vista previa en {url}")
+    else:
+        print(f"{key}: publicado en {publish_doc(state, key, urls, caption)}")
 
 
 def publish_doc(state, doc_id, urls, caption):
@@ -371,11 +440,13 @@ def run():
             comment(p["issue"], f"Publicado en Instagram: {permalink}")
             close_issue(p["issue"])
             del state["pending"][doc_id]
-            state["approved"] += 1
-            if state["mode"] == "review" and state["approved"] >= REVIEW_APPROVALS:
-                state["mode"] = "direct"
+            kind = p.get("kind", "od")
+            c = counters(state, kind)
+            c["approved"] += 1
+            if c["mode"] == "review" and c["approved"] >= REVIEW_APPROVALS:
+                c["mode"] = "direct"
                 comment(p["issue"], f"Con {REVIEW_APPROVALS} publicaciones aprobadas, termina el período de prueba: "
-                                    "desde ahora las órdenes del día nuevas se publican directo.")
+                                    f"desde ahora {KIND_NAMES[kind]} se publican directo.")
             save_state(state, f"Instagram: publicado {doc_id}")
         except PublishError as e:
             report_error("publicacion", f"Vista previa #{p['issue']} (documento {doc_id}): {e}")
@@ -396,13 +467,7 @@ def run():
                     print(f"{doc_id}: sin ítems de alcance general; no se publica.")
                 else:
                     doc, urls, caption = prep
-                    if state["mode"] == "review":
-                        number, url = create_issue(preview_title(doc), preview_body(urls, caption, next_cron_run(), state["approved"]),
-                                                   ["instagram-vista-previa"])
-                        state["pending"][doc_id] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption}
-                        print(f"{doc_id}: vista previa en {url}")
-                    else:
-                        print(f"{doc_id}: publicado en {publish_doc(state, doc_id, urls, caption)}")
+                    enqueue(state, doc_id, "od", od_label(doc), urls, caption)
                     if key:
                         state["sessions"].append(key)
             state["seen"].append(doc_id)  # solo si se resolvió; si falló, se reintenta mañana
@@ -410,7 +475,49 @@ def run():
         except PublishError as e:
             report_error("publicacion", f"Documento {doc_id}: {e}")
             errors += 1
+    errors += run_prensa(state)
     return 1 if errors else 0
+
+
+def run_prensa(state):
+    """"Qué se aprobó" y destacados desde las notas de Prensa. Devuelve la cantidad de errores."""
+    try:
+        notes = prensa.load_notes()
+    except (requests.RequestException, ValueError) as e:
+        report_error("prensa", f"El sitio de Prensa no respondió bien ({type(e).__name__}).")
+        return 1
+    if "prensa_since" not in state:  # primera vez: las sesiones anteriores a hoy no se publican
+        state["prensa_since"] = now().date().isoformat()
+        save_state(state, "Instagram: Prensa desde hoy (sesiones anteriores marcadas como vistas)")
+        print(f"Prensa: primera corrida; se publican las sesiones desde el {state['prensa_since']}.")
+        return 0
+    errors = 0
+    since = date.fromisoformat(state["prensa_since"])
+    for s in prensa.sessions(notes).values():
+        if s["date"] < since:
+            continue
+        jobs = [(f"destacado:{n['id']}", "destacado", lambda folder, n=n, s=s: prepare_destacado(s, n, folder))
+                for n in s["notes"] if prensa.is_destacado(n)]
+        if now().date() >= s["date"] + APROBADO_WAIT:
+            jobs.append((f"aprobado:{s['key']}", "aprobado", lambda folder, s=s: prepare_aprobado(s, folder)))
+        for key, kind, prep in jobs:
+            if key in state["seen"]:
+                continue
+            try:
+                result = prep(f"{key.replace(':', '-')}-{now():%Y%m%d%H%M%S}")
+                if result is None:
+                    print(f"{key}: sin texto usable; no se publica.")
+                else:
+                    enqueue(state, key, kind, *result)
+                state["seen"].append(key)  # solo si se resolvió; si falló, se reintenta mañana
+                save_state(state, f"Instagram: procesado {key}")
+            except AnthropicFailure as e:
+                report_error("anthropic", str(e))
+                errors += 1
+            except PublishError as e:
+                report_error("publicacion", f"{key}: {e}")
+                errors += 1
+    return errors
 
 
 def check_token():
@@ -430,37 +537,66 @@ def check_token():
     return True, f"Token válido: cuenta @{IG_USERNAME}."
 
 
-def run_preview(session_number, year):
-    """Workflow "Probar Instagram": Issue con la vista previa de una orden ya procesada y la verificación del token.
-    No publica ni toca el estado."""
+def od_preview(session_number, year, stamp):
     matches = [r for r in load_index(DATASET_REPO_ID)
                if str(r.get("session_number")) == str(session_number) and str(r.get("session_year")) == str(year)]
     if not matches:
         raise PublishError(f"No hay una orden del día N° {session_number} de {year} en el índice.")
     rec = max(matches, key=lambda r: r.get("created_at") or "")
+    prep = prepare(rec["doc_id"], f"prueba/{rec['doc_id']}-{stamp}")
+    if prep is None:
+        doc = load_processed_json(DATASET_REPO_ID, rec["doc_id"]) or {}
+        return [(od_label(doc), "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría.")]
+    doc, urls, caption = prep
+    return [(od_label(doc), preview_body(urls, caption))]
+
+
+def prensa_preview(session, year, kind, stamp):
+    """session: "23" (ordinaria) o "E1" (especial). Destacado: un Issue por nota destacable (hasta 3)."""
+    especial = str(session)[:1] in "Ee"
+    key = prensa.session_key(str(session).lstrip("EeOo"), year, "Especial" if especial else "Ordinaria")
+    s = prensa.sessions(prensa.load_notes(save=False)).get(key)
+    if not s:
+        raise PublishError(f"No hay notas de Prensa con temas aprobados en la sesión {session} de {year}.")
+    if kind == "aprobado":
+        r = prepare_aprobado(s, f"prueba/aprobado-{key}-{stamp}")
+        return [(r[0], preview_body(*r[1:])) if r else
+                (f"Qué se aprobó · sesión {session}", "**PRUEBA:** ninguna nota de esta sesión dio un resumen usable.")]
+    notes = [n for n in prensa.rank(s["notes"]) if prensa.is_destacado(n)][:3]
+    if not notes:
+        return [(f"Destacado · sesión {session}", "**PRUEBA:** esta sesión no tiene notas aprobadas de Bolsillo, "
+                                                 "Servicios u Obras, así que no habría destacado.")]
+    out = []
+    for n in notes:
+        r = prepare_destacado(s, n, f"prueba/destacado-{n['id']}-{stamp}")
+        out.append((r[0], preview_body(*r[1:])) if r else (f"Destacado · {n['title']}", "**PRUEBA:** sin texto usable."))
+    return out
+
+
+def run_preview(session_number, year, tipo="orden-del-dia"):
+    """Workflow "Probar Instagram": Issue con la vista previa de una sesión y la verificación del token, para cada
+    tipo de post. No publica ni toca el estado."""
     token_ok, token_msg = check_token()
     check = ["### Verificación del token de Instagram", "", ("✅ " if token_ok else "❌ ") + token_msg, ""]
     ensure_setup()
-    prep = prepare(rec["doc_id"], f"prueba/{rec['doc_id']}-{now():%Y%m%d%H%M%S}")
-    if prep is None:
-        doc = load_processed_json(DATASET_REPO_ID, rec["doc_id"]) or {}
-        body = "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría."
-    else:
-        doc, urls, caption = prep
-        body = preview_body(urls, caption)
-    number, url = create_issue(preview_title(doc, prueba=True), "\n".join(check) + "\n" + body, ["instagram-prueba"])
-    print(f"Vista previa de prueba: {url}")
+    stamp = f"{now():%Y%m%d%H%M%S}"
+    kind = TIPOS[tipo]
+    previews = od_preview(session_number, year, stamp) if kind == "od" else prensa_preview(session_number, year, kind, stamp)
+    for label, body in previews:
+        number, url = create_issue(preview_title(label, prueba=True), "\n".join(check) + "\n" + body, ["instagram-prueba"])
+        print(f"Vista previa de prueba: {url}")
     print(("OK: " if token_ok else "ERROR: ") + token_msg)
     return 0 if token_ok else 1  # en rojo en Actions si el token no sirve (el detalle está en el Issue)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Publica en Instagram las órdenes del día nuevas.")
-    ap.add_argument("--prueba", metavar="N", help="número de orden del día: abre un Issue de vista previa, sin publicar")
+    ap = argparse.ArgumentParser(description="Publica en Instagram las órdenes del día nuevas y los posts de Prensa.")
+    ap.add_argument("--prueba", metavar="N", help="número de sesión (E1 = Sesión Especial 1): abre un Issue de vista previa, sin publicar")
     ap.add_argument("--anio", type=int, default=now().year)
+    ap.add_argument("--tipo", choices=list(TIPOS), default="orden-del-dia")
     args = ap.parse_args()
     try:
-        return run_preview(args.prueba, args.anio) if args.prueba else run()
+        return run_preview(args.prueba, args.anio, args.tipo) if args.prueba else run()
     except PublishError as e:
         report_error("otro", str(e))
         return 1

@@ -1,7 +1,7 @@
 name: Auto Fetch Actas
 on:
   schedule:
-    - cron: "0 10 * * *"  # instagram_publisher.py usa esta hora (CRON_HOUR_UTC) para anunciar cuándo publica
+    - cron: "17 10 * * *"  # instagram_publisher.py usa esta hora (CRON_TIME_UTC) para anunciar cuándo publica
   workflow_dispatch: {}
 concurrency:
   group: instagram  # el estado de Instagram es leer-modificar-escribir: nunca dos corridas a la vez
