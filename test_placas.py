@@ -1,6 +1,8 @@
-# Placas reales de las sesiones 18 y 23 (orden del día, "Qué se aprobó" y destacado), con textos normales y con
-# textos al límite: ningún texto puede pisar a otro (en particular, el contenido nunca invade el pie).
+# Placas reales de las sesiones 18 y 23 (orden del día, "Qué se aprobó", destacado y puesta al día), con textos
+# normales y con textos al límite: ningún texto puede pisar a otro ni a la marca o los logos (en particular, el
+# contenido nunca invade el pie), y la marca va siempre dentro de la zona del pie.
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,26 +22,42 @@ TEXTOS = {"corto": "El Concejo aprobó bajar la tasa comercial.", "largo": ic.sh
 
 
 class TextosDibujados:
-    """Registra la caja de cada texto dibujado, agrupada por placa."""
+    """Registra, por placa, la caja de cada texto dibujado y de cada imagen de marca pegada (marca del pie y logos)."""
 
     def __init__(self):
-        self.por_placa = {}
+        self.por_placa, self.imagenes = {}, {}  # por id de la placa
+        self._vivas = []  # mantiene vivas las placas: su id no se reusa
         self._original = ImageDraw.ImageDraw.text
+        self._paste = ic.paste_asset
 
     def __enter__(self):
         registro = self
 
         def text(draw, xy, txt, *args, **kw):
             box = draw.textbbox(xy, txt, font=kw.get("font"))
-            registro.por_placa.setdefault(draw, []).append((box, txt))  # la clave mantiene viva la placa: su id no se reusa
+            registro.placa(draw._image).append((box, txt))
             return registro._original(draw, xy, txt, *args, **kw)
 
-        self._patch = mock.patch.object(ImageDraw.ImageDraw, "text", text)
-        self._patch.start()
+        def paste_asset(img, im, xy):
+            box = registro._paste(img, im, xy)
+            registro.placa(img)
+            registro.imagenes.setdefault(id(img), []).append(box)
+            return box
+
+        self._patches = [mock.patch.object(ImageDraw.ImageDraw, "text", text), mock.patch.object(ic, "paste_asset", paste_asset)]
+        for p in self._patches:
+            p.start()
         return self
 
+    def placa(self, img):
+        if id(img) not in self.por_placa:
+            self._vivas.append(img)
+            self.por_placa[id(img)] = []
+        return self.por_placa[id(img)]
+
     def __exit__(self, *exc):
-        self._patch.stop()
+        for p in self._patches:
+            p.stop()
 
 
 def se_pisan(a, b):
@@ -51,11 +69,25 @@ class SinSuperposicionTest(unittest.TestCase):
         with TextosDibujados() as reg, tempfile.TemporaryDirectory() as out:
             render(out)
         self.assertTrue(reg.por_placa, nombre)
-        for textos in reg.por_placa.values():
+        for placa, textos in reg.por_placa.items():
+            imagenes = reg.imagenes.get(placa, [])
+            marcas = [b for b in imagenes if (b[2] - b[0]) > 3 * (b[3] - b[1])]  # la marca es apaisada; el logo del cierre, no
+            pie = [b for b in marcas if b[1] >= ic.CONTENT_BOTTOM]
             for i, (a, ta) in enumerate(textos):
                 self.assertTrue(0 <= a[0] and a[2] <= ic.W and 0 <= a[1] and a[3] <= ic.H, f"{nombre}: '{ta}' sale de la placa")
+                self.assertNotIn("OBSERVATORIO DE ACTAS", ta.upper(), f"{nombre}: la firma de texto se reemplazó por la marca")
                 for b, tb in textos[i + 1:]:
                     self.assertFalse(se_pisan(a, b), f"{nombre}: '{ta}' se superpone con '{tb}'")
+                for b in imagenes:
+                    self.assertFalse(se_pisan(a, b), f"{nombre}: '{ta}' se superpone con la marca o un logo en {b}")
+            for b in imagenes:
+                self.assertTrue(0 <= b[0] and b[2] <= ic.W and 0 <= b[1] and b[3] <= ic.H, f"{nombre}: imagen fuera de la placa {b}")
+            for b in marcas:  # en el pie (placas de contenido) o arriba, sobre la línea de la barra (portadas)
+                self.assertTrue(b in pie or b[3] <= 130, f"{nombre}: la marca {b} no está ni en el pie ni arriba")
+            for b in pie:
+                self.assertEqual(b[3] - b[1], ic.MARK_H)
+            if any(re.search(r"\d+/\d+$", t) for _, t in textos):  # placa con pie (número de página)
+                self.assertEqual(len(pie), 1, f"{nombre}: placa con pie sin marca")
 
     def test_orden_del_dia(self):
         for n in (18, 23):
@@ -103,7 +135,7 @@ class SinSuperposicionTest(unittest.TestCase):
                   ic.text_block(LARGO, (40, 36), ic.MUTED, 44, 600)] + ic.impact_blocks(["💰 Bolsillo"], LARGO)
         dibujo = ic.layout(blocks, ic.CONTENT_BOTTOM - ic.CONTENT_TOP)
         self.assertLessEqual(sum(ic.block_height(b) for b in dibujo) - dibujo[-1][5], ic.CONTENT_BOTTOM - ic.CONTENT_TOP)
-        self.verificar("placa con todo al máximo", lambda out: ic.content_slide("Sesión N° 18", blocks, "Ref. 1492/2026", "9/10")
+        self.verificar("placa con todo al máximo", lambda out: ic.content_slide("ORDEN DEL DÍA", "Sesión N° 18", blocks, "Ref. 1492/2026", "9/10")
                        .save(Path(out) / "x.png"))
 
 

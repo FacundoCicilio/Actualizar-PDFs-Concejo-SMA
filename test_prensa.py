@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import instagram_carousel as ic
 import prensa
@@ -170,6 +170,14 @@ class ClaudeNotasTest(unittest.TestCase):
         with mock.patch.object(ic, "_client", SimpleNamespace(messages=SimpleNamespace(create=create))), mock.patch("builtins.print"):
             self.assertEqual(ic.destacado_fields(self.nota)["titular"], bueno["titular"])
 
+    def test_periodo_de_vigencia_no_se_borra(self):
+        # la nota 1508 dice "de agosto a diciembre de 2026" y "a partir de dicha publicación": los controles lo dejan
+        desde = "Rige desde su publicación en el Boletín Oficial Municipal, para los meses de agosto a diciembre de 2026."
+        patch, _ = self.cliente(json.dumps({"titular": "El Concejo modificó la Tasa COM y la Tasa ENSATUR", "que_cambia": "",
+                                            "a_quien_afecta": "", "desde_cuando": desde}))
+        with patch:
+            self.assertEqual(ic.destacado_fields(self.nota)["desde_cuando"], desde)
+
     def test_destacado_sin_titular_no_sale(self):
         patch, _ = self.cliente(json.dumps({"titular": "", "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}))
         with patch:
@@ -209,6 +217,24 @@ class PlacasTest(unittest.TestCase):
         self.assertEqual(len(paths), 2)
         self.assertIn("¿A quién afecta? La nota no lo informa.", caption)
         self.assertIn(ic.FUENTE, caption)
+
+    def test_destacado_tres_respuestas_mismo_tamano(self):
+        campos = {"titular": "x", "que_cambia": "Baja un 35% la Tasa COM.",  # corta: sola, entraría más grande
+                  "a_quien_afecta": "Al sector comercial y turístico de San Martín de los Andes, alcanzado por la Tasa "
+                                    "COM y la Tasa de Promoción Turística ENSATUR, y a todos los contribuyentes alcanzados.",
+                  "desde_cuando": ""}
+        respuestas = [campos["que_cambia"], campos["a_quien_afecta"], ic.NO_INFO]
+        tamanos = set()
+        original = ImageDraw.ImageDraw.text
+
+        def text(draw, xy, txt, *args, **kw):
+            if any(txt in r for r in respuestas):
+                tamanos.add(kw["font"].size)
+            return original(draw, xy, txt, *args, **kw)
+
+        with mock.patch.object(ImageDraw.ImageDraw, "text", text):
+            ic.destacado_slide(self.sdoc, campos)
+        self.assertEqual(len(tamanos), 1, tamanos)
 
     def test_orden_del_dia_cierra_con_y_n_temas_mas(self):
         items = ic.select_items(DOC)

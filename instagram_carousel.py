@@ -11,13 +11,12 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 from actas_parser import IMPACT_MESSAGES, MONTHS, process_pdf
 
 W, H = 1080, 1350
 M = 90  # margen lateral
-BRAND = "Observatorio de Actas SMA"
 MAX_ITEMS = 8
 
 BG = "#F6F4EF"
@@ -333,10 +332,11 @@ def clip(draw, lines, n, fnt, width):
     return lines[:n - 1] + [" ".join(words).rstrip(",;:.") + "…"]
 
 
-def draw_lines(draw, xy, lines, fnt, lh, fill):
+def draw_lines(draw, xy, lines, fnt, lh, fill, center=False):
+    """Dibuja las líneas desde xy; con center, cada línea centrada en la placa (x se ignora)."""
     x, y = xy
     for ln in lines:
-        draw.text((x, y), ln, font=fnt, fill=fill)
+        draw.text(((W - draw.textlength(ln, font=fnt)) // 2 if center else x, y), ln, font=fnt, fill=fill)
         y += lh
     return y
 
@@ -349,19 +349,71 @@ def chip(draw, x, y, label, color):
     return x + tw + 44 + 16
 
 
-def brand_bar(draw, color, right_text="", right_color=None):
-    draw.text((M, 70), BRAND.upper(), font=font(28, True), fill=color)
+# ------------------------------------------------------------------ marca (assets/)
+ASSETS = Path(__file__).with_name("assets")
+MARK_H = 44             # marca del pie
+COVER_MARK_H = 52       # marca arriba a la izquierda en las portadas
+CLOSING_LOGO_W = 300    # logo centrado en el cierre
+_assets = {}
+
+
+def asset(name, height=None, width=None):
+    """PNG transparente de assets/, recortado a su contenido (los PNG traen margen) y llevado al alto o al ancho pedido."""
+    key = (name, height, width)
+    if key not in _assets:
+        im = Image.open(ASSETS / name).convert("RGBA")
+        im = im.crop(im.getchannel("A").getbbox())
+        if width:
+            height = round(im.height * width / im.width)
+        _assets[key] = im.resize((round(im.width * height / im.height), height), Image.LANCZOS)
+    return _assets[key]
+
+
+def paste_asset(img, im, xy):
+    img.paste(im, xy, im)
+    return (xy[0], xy[1], xy[0] + im.width, xy[1] + im.height)
+
+
+def footer_mark_name(img, box):
+    """Marca blanca sobre fondos oscuros o saturados, navy sobre fondos claros (luminancia media del fondo)."""
+    return "marca_pie_blanca.png" if ImageStat.Stat(img.crop(box).convert("L")).mean[0] < 150 else "marca_pie_navy.png"
+
+
+def footer(img, d, right_text, y_text=H - 100):
+    """Pie: marca a la izquierda (centrada con el texto) y, a la derecha, "Ref."/"Fuente" + página. Si el texto no
+    entra al lado de la marca, achica la letra."""
+    mark_w = asset("marca_pie_navy.png", MARK_H).width
+    box = (M, y_text + 16 - MARK_H // 2, M + mark_w, y_text + 16 - MARK_H // 2 + MARK_H)
+    right_edge = paste_asset(img, asset(footer_mark_name(img, box), MARK_H), box[:2])[2]
+    for size in (28, 26, 24, 22, 20):
+        fnt = font(size)
+        tw = d.textlength(right_text, font=fnt)
+        if W - M - tw >= right_edge + 32:
+            break
+    fill = "white" if footer_mark_name(img, box) == "marca_pie_blanca.png" else MUTED
+    d.text((W - M - tw, y_text + (28 - size) // 2), right_text, font=fnt, fill=fill)
+
+
+def top_bar(draw, label, color, right_text="", right_color=None):
+    """Barra de arriba de las placas de contenido: el tipo de post (la marca ya va en el pie)."""
+    if label:
+        draw.text((M, 70), label, font=font(28, True), fill=color)
     if right_text:
         fnt = font(28)
         draw.text((W - M - draw.textlength(right_text, font=fnt), 70), right_text, font=fnt, fill=right_color or color)
+
+
+def cover_top(img, d, soft):
+    """Portadas: el tipo de post ya está en la placa, así que arriba solo va la marca (blanca, sobre el color)."""
+    paste_asset(img, asset("marca_pie_blanca.png", COVER_MARK_H), (M, 130 - COVER_MARK_H - 22))
+    d.line((M, 130, W - M, 130), fill=soft, width=2)
 
 
 def cover(doc, n_selected, n_more=0, kicker="ORDEN DEL DÍA", colors=(ACCENT, ACCENT_SOFT), teaser=None):
     accent, soft = colors
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
-    brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    cover_top(img, d, soft)
     y = 330
     d.text((M, y), kicker, font=font(40, True), fill=soft)
     y += 90
@@ -404,7 +456,8 @@ def item_slide(doc, item, simple, pos, n_selected, page, total):
         blocks.append(text_block(official, (84, 76, 68, 60, 56, 52, 48, 44, 40, 36), INK, 48, 660))
     blocks += impact_blocks(tags, impact_msg)
     ref = f"Ref. {item.get('expediente') or item.get('key')}" if item.get("expediente") or item.get("key") else ""
-    return content_slide(session_title(doc), blocks, ref, f"{page}/{total}")
+    header = session_title(doc) if doc.get("session_number") else ""  # sin número diría "Orden del Día" dos veces
+    return content_slide("ORDEN DEL DÍA", header, blocks, ref, f"{page}/{total}")
 
 
 MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))  # solo para medir texto antes de dibujar
@@ -459,12 +512,13 @@ def block_height(b):
     return (len(lines) * lh if kind == "text" else lh) + gap
 
 
-def content_slide(header, blocks, footer_left, page_txt, accent=ACCENT):
-    """Placa clara. blocks (text_block, impact_blocks) de arriba a abajo; se miden primero y se centran en el alto
-    libre, sin invadir nunca el pie."""
+def content_slide(label, header, blocks, ref, page_txt, accent=ACCENT):
+    """Placa clara. label: tipo de post (barra de arriba); header: a la derecha de la barra; ref: "Ref. …"/"Fuente …"
+    (pie, a la derecha, con la página). blocks (text_block, impact_blocks) de arriba a abajo; se miden primero y se
+    centran en el alto libre, sin invadir nunca el pie."""
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    brand_bar(d, accent, header, MUTED)
+    top_bar(d, label, accent, header, MUTED)
     d.line((M, 130, W - M, 130), fill=LINE, width=2)
 
     avail = CONTENT_BOTTOM - CONTENT_TOP
@@ -483,10 +537,7 @@ def content_slide(header, blocks, footer_left, page_txt, accent=ACCENT):
             y += lh
         y += gap
 
-    footer_font = font(28)
-    if footer_left:
-        d.text((M, H - 100), footer_left, font=footer_font, fill=MUTED)
-    d.text((W - M - d.textlength(page_txt, font=footer_font), H - 100), page_txt, font=footer_font, fill=MUTED)
+    footer(img, d, f"{ref} · {page_txt}" if ref else page_txt)
     return img
 
 
@@ -494,15 +545,15 @@ def closing(colors=(ACCENT, ACCENT_SOFT)):
     accent, soft = colors
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
-    brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=soft, width=2)
-    d.text((M, 430), "¿Querés saber más?", font=font(56), fill=soft)
-    title_font = font(100, True)
-    y = draw_lines(d, (M, 530), ["Más info:", "link en la bio"], title_font, 132, "white")
-    d.line((M, y + 50, M + 140, y + 50), fill=soft, width=6)
+    logo = asset("logo_cierre_blanco.png", width=CLOSING_LOGO_W)
+    paste_asset(img, logo, ((W - logo.width) // 2, 380 - logo.height))  # 50 px de aire sobre "¿Querés saber más?"
+    # todo centrado, como el logo
+    draw_lines(d, (M, 430), ["¿Querés saber más?"], font(56), 74, soft, center=True)
+    y = draw_lines(d, (M, 530), ["Más info:", "link en la bio"], font(100, True), 132, "white", center=True)
+    d.line(((W - 140) // 2, y + 50, (W + 140) // 2, y + 50), fill=soft, width=6)
     sub_font, sub_lines, sub_lh = fit_text(d, "Resúmenes claros y buscables de cada sesión del Concejo Deliberante de San Martín de los Andes.",
                                           W - 2 * M, 200, sizes=(40, 36))
-    draw_lines(d, (M, y + 110), sub_lines, sub_font, sub_lh, "white")
+    draw_lines(d, (M, y + 110), sub_lines, sub_font, sub_lh, "white", center=True)
     return img
 
 
@@ -640,7 +691,7 @@ def note_slide(sdoc, note, pos, n, page, total):
     blocks = [text_block(f"APROBADO · {pos} DE {n}", (32,), APROBADO[0], 36, bold=True),
               text_block("En criollo:", (36,), APROBADO[0], 8, bold=True),
               text_block(note["line"], (72, 66, 60, 56, 52, 48, 44), INK, 44, 560, bold=True)] + impact_blocks(tags, impact_msg)
-    return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", APROBADO[0])
+    return content_slide("QUÉ SE APROBÓ", session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", APROBADO[0])
 
 
 def aprobado_caption(sdoc, notes):
@@ -666,8 +717,7 @@ def destacado_cover(sdoc, fields, tags):
     accent, soft = DESTACADO
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
-    brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    cover_top(img, d, soft)
     d.text((M, 300), "DESTACADO", font=font(40, True), fill=soft)
     # de arriba a abajo, cada caja con alto máximo: lo último (las etiquetas) termina antes de H - 230
     f, ls, lh = fit_text(d, fields["titular"], W - 2 * M, 430, sizes=(96, 88, 80, 72, 64, 56), bold=True)
@@ -683,13 +733,20 @@ def destacado_cover(sdoc, fields, tags):
     return img
 
 
+ANSWER_SIZES, ANSWER_MAX_H = (52, 48, 44, 40, 36, 32), 260
+
+
 def destacado_slide(sdoc, fields):
+    answers = [(fields[key] or NO_INFO, bool(fields[key])) for key, _ in QUESTIONS]
+    # un solo tamaño para las tres respuestas: el más grande con el que entran todas en su caja
+    size = next((s for s in ANSWER_SIZES
+                 if all(len(wrap(MEASURE, a, font(s, bold), W - 2 * M)) * int(s * 1.32) <= ANSWER_MAX_H for a, bold in answers)),
+                ANSWER_SIZES[-1])
     blocks = []
-    for key, question in QUESTIONS:
-        answer = fields[key] or NO_INFO
+    for (_, question), (answer, informed) in zip(QUESTIONS, answers):
         blocks += [text_block(question, (36,), DESTACADO[0], 10, bold=True),
-                   text_block(answer, (52, 48, 44, 40, 36, 32), INK if fields[key] else MUTED, 56, 260, bold=bool(fields[key]))]
-    return content_slide(session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", "2/2", DESTACADO[0])
+                   text_block(answer, (size,), INK if informed else MUTED, 56, ANSWER_MAX_H, bold=informed)]
+    return content_slide("DESTACADO", session_title(sdoc), blocks, "Fuente: Prensa del Concejo Deliberante", "2/2", DESTACADO[0])
 
 
 def destacado_caption(sdoc, fields):
@@ -717,8 +774,7 @@ def puesta_cover(start, today, n):
     accent, soft = PUESTA
     img = Image.new("RGB", (W, H), accent)
     d = ImageDraw.Draw(img)
-    brand_bar(d, "white")
-    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    cover_top(img, d, soft)
     d.text((M, 330), "PUESTA AL DÍA", font=font(40, True), fill=soft)
     f, ls, lh = fit_text(d, "Lo más importante que aprobó el Concejo", W - 2 * M, 360, sizes=(96, 88, 80, 72), bold=True)
     y = draw_lines(d, (M, 420), ls, f, lh, "white") + 20
@@ -740,7 +796,7 @@ def puesta_slide(item, pos, n, page, total):
               text_block("En criollo:", (36,), PUESTA[0], 8, bold=True),
               text_block(item["line"], (44, 40, 36, 34, 32), INK, 44, 320)]
     blocks += impact_blocks(tags, IMPACT_MESSAGES.get(tags[0], "") if tags else "")
-    return content_slide(f"Puesta al día · {pos} de {n}", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
+    return content_slide("PUESTA AL DÍA", "", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
 
 
 def puesta_caption(start, today, items):
