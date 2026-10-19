@@ -82,6 +82,33 @@ class SesionTest(unittest.TestCase):
         self.assertNotIn("Figueroa", texto)
 
 
+class VigenciaTest(unittest.TestCase):
+    def test_plan_de_deudas_vencido(self):
+        # "Regirá desde el 1 y hasta el 30 de septiembre de 2026"; sessions() le suma las etiquetas de impacto
+        plan = next(n for n in prensa.sessions(NOTAS)["2026-O18"]["notes"] if n["id"] == 1482)
+        self.assertTrue(prensa.is_destacado(plan))  # Bolsillo: sería destacado...
+        self.assertEqual(prensa.vigencia_hasta(plan), date(2026, 9, 30))
+        self.assertFalse(prensa.vencida(plan, date(2026, 9, 30)))  # el último día todavía rige
+        self.assertTrue(prensa.vencida(plan, date(2026, 10, 1)))   # ...pero desde octubre ya no
+
+    def test_vigentes_o_sin_plazo(self):
+        self.assertEqual(prensa.vigencia_hasta(NOTAS["1508"]), date(2026, 12, 31))  # "hasta diciembre de 2026"
+        self.assertFalse(prensa.vencida(NOTAS["1508"], date(2026, 10, 18)))
+        self.assertIsNone(prensa.vigencia_hasta(NOTAS["1777"]))  # la exención no informa plazo
+
+    def test_formatos(self):
+        base = {"date": "2026-08-20T10:00:00"}
+        casos = {
+            "Rige del 1 al 30 de septiembre.": date(2026, 9, 30),  # sin año: el de la nota
+            "La inscripción vence el 5 de octubre de 2026.": date(2026, 10, 5),
+            "Aplica de agosto a diciembre de 2026.": date(2026, 12, 31),
+            "Del 1 al 15 de septiembre o hasta el 31 de marzo de 2027.": date(2027, 3, 31),  # la más tardía
+            "La ordenanza entrará en vigencia a partir de su publicación.": None,
+        }
+        for texto, esperado in casos.items():
+            self.assertEqual(prensa.vigencia_hasta({**base, "text": texto}), esperado, texto)
+
+
 def respuesta(texto):
     return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=texto)])
 

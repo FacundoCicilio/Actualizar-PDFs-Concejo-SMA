@@ -1,5 +1,6 @@
 # Notas de la sección Prensa del Concejo (WordPress, https://prensacd.cdsma.gob.ar/prensa/), agrupadas por sesión.
 # Las lee instagram_publisher.py para los posts "Qué se aprobó" y "Destacado". Se guardan en el dataset privado de HF.
+import calendar
 import html
 import re
 from datetime import date, datetime
@@ -24,6 +25,11 @@ APPROVED_PAT = re.compile(r"\b(?:aprob[oó]|fue\s+aprobad[oa]|otorg[oó]|declar[
                           r"|sancion[oó]|autoriz[oó]|exim(?:i[oó]|e)|ratific[oó])\b", re.I)
 NOT_APPROVED_PAT = re.compile(r"\btratar[aá]\b|\brechaz|\bEstudiantil\b", re.I)
 EXCLUDED_TITLE_PAT = re.compile(r"Audiencia\s+P[uú]blica|Estudiantil", re.I)
+_MES = "|".join(MONTHS)
+# Fin de vigencia o de plazo: "hasta el 30 de septiembre de 2026", "del 1 al 30 de septiembre", "vence el 30 de …",
+# y solo con mes: "hasta diciembre de 2026", "de agosto a diciembre de 2026" (fin de ese mes).
+END_DAY_PAT = re.compile(rf"\b(?:hasta\s+el|vence\s+el|del?\s+\d{{1,2}}\s+al)\s+(\d{{1,2}})\s+de\s+({_MES})(?:\s+de\s+(\d{{4}}))?", re.I)
+END_MONTH_PAT = re.compile(rf"\b(?:hasta|de\s+(?:{_MES})\s+a)\s+({_MES})\s+de\s+(\d{{4}})", re.I)
 
 
 def plain(rendered):
@@ -116,6 +122,28 @@ def rank(notes):
 
 def is_destacado(note):
     return ic.is_relevant(note) and bool(DESTACADO_TAGS & set(note["impact_tags"]))
+
+
+def vigencia_hasta(note):
+    """Última fecha de fin de vigencia o de plazo que informa la nota, o None si no informa ninguna. Se toma la más
+    tardía: si alguna medida sigue vigente, la nota todavía sirve como destacado."""
+    text, year = note["text"], int(note["date"][:4])
+    ends = []
+    for m in END_DAY_PAT.finditer(text):
+        try:
+            ends.append(date(int(m.group(3) or year), MONTHS[m.group(2).lower()], int(m.group(1))))
+        except ValueError:  # "31 de septiembre"
+            pass
+    for m in END_MONTH_PAT.finditer(text):
+        y, mo = int(m.group(2)), MONTHS[m.group(1).lower()]
+        ends.append(date(y, mo, calendar.monthrange(y, mo)[1]))
+    return max(ends, default=None)
+
+
+def vencida(note, today):
+    """El plazo que informa la nota ya terminó: no se publica como destacado (sigue en "Qué se aprobó")."""
+    end = vigencia_hasta(note)
+    return end is not None and end < today
 
 
 def note_text(note):

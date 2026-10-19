@@ -306,7 +306,7 @@ def prepare_aprobado(s, folder):
 
 
 def prepare_destacado(s, note, folder):
-    """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption) o None."""
+    """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption, vigente hasta) o None."""
     sdoc = prensa.session_doc(s)
     fields, error = ic.destacado(prensa.note_text(note))
     if error:
@@ -317,7 +317,13 @@ def prepare_destacado(s, note, folder):
         paths = ic.render_destacado(sdoc, fields, note["impact_tags"], tmp, ext="jpg")
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
         urls = upload_images(paths, folder)
-    return f"Destacado · {fields['titular']}", urls, caption
+    end = prensa.vigencia_hasta(note)
+    return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat()
+
+
+def destacables(s, today):
+    """Notas de la sesión que van como destacado: no las que informan un plazo que ya terminó."""
+    return [n for n in s["notes"] if prensa.is_destacado(n) and not prensa.vencida(n, today)]
 
 
 def next_cron_run():
@@ -361,13 +367,16 @@ def counters(state, kind):
     return state.setdefault("review", {}).setdefault(kind, {"approved": 0, "mode": "review"})
 
 
-def enqueue(state, key, kind, label, urls, caption):
-    """Vista previa por Issue mientras el tipo está en período de prueba; después, publica directo."""
+def enqueue(state, key, kind, label, urls, caption, until=None):
+    """Vista previa por Issue mientras el tipo está en período de prueba; después, publica directo.
+    until: fecha ISO en que vence lo que informa la nota; si pasa antes de publicar, no se publica."""
     c = counters(state, kind)
     if c["mode"] == "review":
         number, url = create_issue(preview_title(label), preview_body(urls, caption, next_cron_run(), c["approved"]),
                                    ["instagram-vista-previa"])
         state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
+        if until:
+            state["pending"][key]["until"] = until
         print(f"{key}: vista previa en {url}")
     else:
         print(f"{key}: publicado en {publish_doc(state, key, urls, caption)}")
@@ -436,6 +445,13 @@ def run():
                 continue
             if now() - datetime.fromisoformat(p["created_at"]) < REVIEW_WAIT:
                 continue
+            if p.get("until") and now().date() > date.fromisoformat(p["until"]):
+                comment(p["issue"], f"No se publica: el plazo que informa la nota terminó el "
+                                    f"{date.fromisoformat(p['until']):%d/%m/%Y}. Queda en el resumen 'Qué se aprobó'.")
+                close_issue(p["issue"])
+                del state["pending"][doc_id]
+                save_state(state, f"Instagram: vencido {doc_id}")
+                continue
             permalink = publish_doc(state, doc_id, p["images"], p["caption"])
             comment(p["issue"], f"Publicado en Instagram: {permalink}")
             close_issue(p["issue"])
@@ -497,7 +513,7 @@ def run_prensa(state):
         if s["date"] < since:
             continue
         jobs = [(f"destacado:{n['id']}", "destacado", lambda folder, n=n, s=s: prepare_destacado(s, n, folder))
-                for n in s["notes"] if prensa.is_destacado(n)]
+                for n in destacables(s, now().date())]
         if now().date() >= s["date"] + APROBADO_WAIT:
             jobs.append((f"aprobado:{s['key']}", "aprobado", lambda folder, s=s: prepare_aprobado(s, folder)))
         for key, kind, prep in jobs:
@@ -560,16 +576,16 @@ def prensa_preview(session, year, kind, stamp):
         raise PublishError(f"No hay notas de Prensa con temas aprobados en la sesión {session} de {year}.")
     if kind == "aprobado":
         r = prepare_aprobado(s, f"prueba/aprobado-{key}-{stamp}")
-        return [(r[0], preview_body(*r[1:])) if r else
+        return [(r[0], preview_body(r[1], r[2])) if r else
                 (f"Qué se aprobó · sesión {session}", "**PRUEBA:** ninguna nota de esta sesión dio un resumen usable.")]
-    notes = [n for n in prensa.rank(s["notes"]) if prensa.is_destacado(n)][:3]
+    notes = prensa.rank(destacables(s, now().date()))[:3]
     if not notes:
         return [(f"Destacado · sesión {session}", "**PRUEBA:** esta sesión no tiene notas aprobadas de Bolsillo, "
-                                                 "Servicios u Obras, así que no habría destacado.")]
+                                                 "Servicios u Obras con un plazo vigente, así que no habría destacado.")]
     out = []
     for n in notes:
         r = prepare_destacado(s, n, f"prueba/destacado-{n['id']}-{stamp}")
-        out.append((r[0], preview_body(*r[1:])) if r else (f"Destacado · {n['title']}", "**PRUEBA:** sin texto usable."))
+        out.append((r[0], preview_body(r[1], r[2])) if r else (f"Destacado · {n['title']}", "**PRUEBA:** sin texto usable."))
     return out
 
 

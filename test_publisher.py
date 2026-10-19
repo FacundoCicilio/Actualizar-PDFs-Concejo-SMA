@@ -20,10 +20,10 @@ SIN_GENERALES = {"session_number": "24", "session_year": 2026, "date": "15/10/20
      "impact_tags": ["🎭 Cultura/Eventos"]}]}
 
 
-def nota(note_id, n, dia, titulo, verbo="aprobó"):
+def nota(note_id, n, dia, titulo, verbo="aprobó", vigencia="La norma rige desde enero de 2027."):
     """Nota de Prensa de la sesión n, realizada el día `dia` de octubre de 2026 y publicada ese mismo día."""
     texto = (f"El Concejo Deliberante de San Martín de los Andes {verbo}, durante la {n}ª Sesión Ordinaria del año 2026, "
-             f"realizada el jueves {dia} de octubre, {titulo.lower()}. La norma rige desde enero de 2027.")
+             f"realizada el jueves {dia} de octubre, {titulo.lower()}. {vigencia}")
     return {"id": note_id, "date": f"2026-10-{dia:02d}T12:00:00", "modified": f"2026-10-{dia:02d}T12:00:00",
             "link": f"https://prensacd.cdsma.gob.ar/{note_id}/", "title": titulo, "text": texto}
 
@@ -310,6 +310,32 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(len(self.gh.by_label("instagram-vista-previa")), 2)  # sin duplicados
         self.assertEqual(len(self.ig.published()), 2)  # cada uno, en la corrida siguiente a su Issue
 
+    def test_destacado_con_plazo_vencido_queda_solo_en_el_resumen(self):
+        self.run_pub()
+        self.run_pub(1)
+        self.notes["40"] = nota(40, 25, 19, "El Plan de Regularización de Deudas Municipales",
+                                vigencia="Regirá desde el 19 y hasta el 20 de octubre de 2026.")
+        self.clock[0] = T0
+        self.run_pub(24 * 3 + 1)  # 21/10: el plan ya no rige
+        self.assertEqual(self.gh.by_label("instagram-vista-previa"), [])
+        self.run_pub(24 * 8 + 1)  # 26/10: pasaron 7 días de la sesión
+        [resumen] = self.gh.by_label("instagram-vista-previa")
+        self.assertIn("Qué se aprobó", resumen["title"])
+        self.assertIn("![Placa 3]", resumen["body"])  # portada + la nota del plan + cierre
+
+    def test_si_el_plazo_vence_antes_de_publicar_no_se_publica(self):
+        self.run_pub()
+        self.run_pub(1)
+        self.notes["41"] = nota(41, 25, 19, TASA, vigencia="Rige del 19 al 19 de octubre de 2026.")
+        self.run_pub(25)  # 19/10: vista previa (todavía rige)
+        [issue] = self.gh.by_label("instagram-vista-previa")
+        self.assertEqual(self.state["pending"]["destacado:41"]["until"], "2026-10-19")
+        self.run_pub(49)  # 20/10: ya venció
+        self.assertEqual(self.ig.published(), [])
+        self.assertEqual(issue["state"], "closed")
+        self.assertIn("el plazo que informa la nota terminó el 19/10/2026", issue["comments"][-1])
+        self.assertEqual(pub.counters(self.state, "destacado")["approved"], 0)
+
     def test_periodo_de_prueba_por_tipo(self):
         self.run_pub()
         self.run_pub(1)
@@ -442,6 +468,12 @@ class PublisherTest(unittest.TestCase):
                                   "PRUEBA Instagram: Destacado · Baja la tasa comercial"])
         self.assertNotIn(pub.STATE_PATH, self.hf)
         self.assertEqual(self.ig.published(), [])
+
+    def test_prueba_destacado_omite_plazos_vencidos(self):
+        self.notes["2"] = nota(2, 23, 8, TASA, vigencia="Rige del 1 al 30 de septiembre de 2026.")
+        pub.run_preview("23", 2026, "destacado")
+        [issue] = self.gh.by_label("instagram-prueba")
+        self.assertIn("con un plazo vigente", issue["body"])
 
     def test_prueba_destacado_sin_notas_destacables(self):
         pub.run_preview("23", 2026, "destacado")
