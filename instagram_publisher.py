@@ -32,6 +32,8 @@ MEDIA_BRANCH = "instagram-media"     # imágenes públicas para Instagram; un pu
 GRAPH = "https://graph.instagram.com/v25.0"
 IG_USERNAME = "actas.sma"  # cuenta en la que se publica: la prueba verifica que el token sea de esta cuenta
 REVIEW_APPROVALS = 3
+STORY_ATTEMPTS = 2                   # la historia: el intento al publicar el carrusel y un solo reintento
+STORY_MAX_AGE = timedelta(hours=24)  # después, "Nuevo post" ya no tiene sentido
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
 REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación
 CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
@@ -48,6 +50,7 @@ ERROR_TITLES = {
     "anthropic": "Instagram: falló la API de Anthropic",
     "prensa": "Instagram: no se pudieron leer las notas de Prensa",
     "boletin": "Instagram: no se pudo leer el Boletín Oficial",
+    "historia": "Instagram: falló la historia",
     "otro": "Instagram: error inesperado",
 }
 
@@ -122,6 +125,13 @@ def upload_images(paths, folder):
         else:
             raise PublishError(f"La imagen {u} no quedó accesible públicamente.")
     return urls
+
+
+def upload_with_story(paths, tmp, folder, text=ic.STORY_TEXT):
+    """Sube las placas y la historia (hecha con la portada): lo que se publica es lo que se revisó.
+    Devuelve (urls de las placas, url de la historia)."""
+    urls = upload_images(paths + [ic.render_story(paths[0], Path(tmp) / "historia.jpg", text)], folder)
+    return urls[:-1], urls[-1]
 
 
 def create_issue(title, body, labels):
@@ -277,7 +287,8 @@ def session_key(rec):
 
 
 def prepare(doc_id, folder):
-    """Genera el carrusel en JPEG y sube las imágenes. Devuelve (doc, urls, caption) o None sin ítems de alcance general."""
+    """Genera el carrusel en JPEG y sube las imágenes. Devuelve (doc, urls, caption, historia) o None sin ítems de
+    alcance general."""
     doc = load_processed_json(DATASET_REPO_ID, doc_id)
     if not doc:
         raise PublishError(f"No encontré processed/{doc_id}.json en el dataset.")
@@ -290,12 +301,13 @@ def prepare(doc_id, folder):
     with tempfile.TemporaryDirectory() as tmp:
         paths = ic.render_carousel(doc, tmp, prefix="placa", simple_lines=lines, ext="jpg")
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
-        urls = upload_images(paths, folder)
-    return doc, urls, caption
+        urls, story = upload_with_story(paths, tmp, folder)
+    return doc, urls, caption, story
 
 
 def prepare_aprobado(s, folder):
-    """Carrusel "Qué se aprobó" de una sesión. Devuelve (título, urls, caption) o None si ninguna nota dio un resumen."""
+    """Carrusel "Qué se aprobó" de una sesión. Devuelve (título, urls, caption, None, historia) o None si ninguna nota
+    dio un resumen (None: no tiene fecha de vencimiento, como el destacado)."""
     sdoc = prensa.session_doc(s)
     label = f"Qué se aprobó · {ic.session_title(sdoc)} ({ic.date_long(sdoc['date'])})"
     notes = prensa.rank(s["notes"])[:ic.MAX_ITEMS]
@@ -308,12 +320,13 @@ def prepare_aprobado(s, folder):
     with tempfile.TemporaryDirectory() as tmp:
         paths = ic.render_aprobado(sdoc, picked, tmp, ext="jpg")
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
-        urls = upload_images(paths, folder)
-    return label, urls, caption
+        urls, story = upload_with_story(paths, tmp, folder)
+    return label, urls, caption, None, story
 
 
 def prepare_destacado(s, note, folder):
-    """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption, vigente hasta) o None."""
+    """Dos placas: qué cambia, a quién afecta y desde cuándo. Devuelve (título, urls, caption, vigente hasta, historia)
+    o None."""
     sdoc = prensa.session_doc(s)
     ordenanza = note.get("ordenanza")  # del Boletín Oficial: articulado en lugar de nota de Prensa
     fields, error = ic.destacado(prensa.note_text(note), ordenanza=bool(ordenanza))
@@ -326,9 +339,9 @@ def prepare_destacado(s, note, folder):
         caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
         if ordenanza and boletin.leaks(caption):
             raise PublishError(f"El destacado de la Ordenanza {ordenanza['label']} nombraba a un particular: no se publica.")
-        urls = upload_images(paths, folder)
+        urls, story = upload_with_story(paths, tmp, folder)
     end = prensa.vigencia_hasta(note)
-    return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat()
+    return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat(), story
 
 
 def destacables(s, today):
@@ -350,7 +363,7 @@ def preview_title(label, prueba=False):
     return f"{'PRUEBA ' if prueba else 'Vista previa '}Instagram: {label}"
 
 
-def preview_body(urls, caption, deadline=None, approved=None, head=None):
+def preview_body(urls, caption, deadline=None, approved=None, head=None, story=None):
     if head is None and deadline is None:
         head = ["**PRUEBA: esta vista previa no se publica.**"]
     elif head is None:
@@ -359,6 +372,8 @@ def preview_body(urls, caption, deadline=None, approved=None, head=None):
                 "**Si no querés que se publique, poné la etiqueta `no-publicar`** (o cerrá este Issue) antes de esa hora."]
     body = head + ["", "### Placas", ""] + [f"![Placa {i}]({u})" for i, u in enumerate(urls, 1)]
     body += ["", "### Texto del post", "", "```text", caption.strip(), "```"]
+    if story:
+        body += ["", "### Historia", "", "Se publica justo después del carrusel.", "", f"![Historia]({story})"]
     if approved is not None:
         body += ["", f"Período de prueba: {approved} de {REVIEW_APPROVALS} publicaciones aprobadas de este tipo antes de pasar a publicar directo."]
     return "\n".join(body)
@@ -377,23 +392,28 @@ def counters(state, kind):
     return state.setdefault("review", {}).setdefault(kind, {"approved": 0, "mode": "review"})
 
 
-def enqueue(state, key, kind, label, urls, caption, until=None):
+def enqueue(state, key, kind, label, urls, caption, until=None, story=None):
     """Vista previa por Issue mientras el tipo está en período de prueba; después, publica directo.
-    until: fecha ISO en que vence lo que informa la nota; si pasa antes de publicar, no se publica."""
+    until: fecha ISO en que vence lo que informa la nota; si pasa antes de publicar, no se publica.
+    story: URL de la historia que se publica después del carrusel."""
     c = counters(state, kind)
     if c["mode"] == "review":
-        number, url = create_issue(preview_title(label), preview_body(urls, caption, next_cron_run(), c["approved"]),
+        number, url = create_issue(preview_title(label),
+                                   preview_body(urls, caption, next_cron_run(), c["approved"], story=story),
                                    ["instagram-vista-previa"])
         state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
         if until:
             state["pending"][key]["until"] = until
+        if story:
+            state["pending"][key]["story"] = story
         print(f"{key}: vista previa en {url}")
     else:
-        print(f"{key}: publicado en {publish_doc(state, key, urls, caption)}")
+        print(f"{key}: publicado en {publish_doc(state, key, urls, caption, story)}")
 
 
-def publish_doc(state, doc_id, urls, caption):
-    """Publica el carrusel y devuelve el link. Guarda 'publicando' antes de media_publish para no duplicar el post."""
+def publish_doc(state, doc_id, urls, caption, story=None):
+    """Publica el carrusel y devuelve el link. Guarda 'publicando' antes de media_publish para no duplicar el post.
+    Después publica la historia (story); si falla, el carrusel queda publicado igual (ver post_story)."""
     prev = state["published"].get(doc_id)
     if prev and prev.get("status") == "done":  # ya publicado (p. ej. falló cerrar el Issue después): no repetir
         return prev.get("permalink", "")
@@ -407,12 +427,63 @@ def publish_doc(state, doc_id, urls, caption):
             return prev["permalink"]
     container = build_carousel(token, uid, urls, caption)
     state["published"][doc_id] = {"status": "publishing", "container": container, "images": urls, "caption": caption, "at": iso(now())}
+    if story:
+        state["published"][doc_id]["story"] = {"url": story, "status": "pending", "attempts": 0}
     save_state(state, f"Instagram: publicando {doc_id}")
     media_id = ig("POST", f"{uid}/media_publish", token, creation_id=container)["id"]
     permalink = ig("GET", media_id, token, fields="permalink").get("permalink", "")
     state["published"][doc_id].update(status="done", media_id=media_id, permalink=permalink)
     save_state(state, f"Instagram: publicado {doc_id}")
+    post_story(state, doc_id)
     return permalink
+
+
+def recent_story(token, uid, since):
+    """Historia publicada desde `since` (por si una corrida anterior la publicó y no llegó a guardarlo)."""
+    stories = ig("GET", f"{uid}/stories", token, fields="id,timestamp").get("data", [])
+    since = datetime.fromisoformat(since)
+    return next((st for st in stories if st.get("timestamp")
+                 and datetime.strptime(st["timestamp"], "%Y-%m-%dT%H:%M:%S%z") >= since), None)
+
+
+def post_story(state, doc_id):
+    """Publica la historia de un carrusel ya publicado. Si falla: Issue de error y un solo reintento en la corrida
+    siguiente, solo dentro de las 24 h del carrusel (después, una historia de "Nuevo post" ya no sirve).
+    Nunca hace fallar al carrusel. Devuelve True si quedó publicada."""
+    pub = state["published"][doc_id]
+    st = pub.get("story")
+    if not st or st["status"] in ("done", "descartada"):
+        return bool(st) and st["status"] == "done"
+    if now() - datetime.fromisoformat(pub["at"]) > STORY_MAX_AGE:
+        st["status"] = "descartada"
+        save_state(state, f"Instagram: historia descartada {doc_id}")
+        report_error("historia", f"{doc_id}: pasaron 24 horas desde el carrusel; la historia se descarta sin publicar.")
+        return False
+    try:
+        token = get_token()
+        uid = user_id(token)
+        if st["status"] == "publishing":
+            found = recent_story(token, uid, st["at"])
+            if found:
+                st.update(status="done", media_id=found["id"])
+                save_state(state, f"Instagram: historia publicada {doc_id}")
+                return True
+        container = ig("POST", f"{uid}/media", token, image_url=st["url"], media_type="STORIES")["id"]
+        wait_finished(container, token)
+        st.update(status="publishing", at=iso(now()))
+        save_state(state, f"Instagram: publicando historia {doc_id}")
+        st.update(status="done", media_id=ig("POST", f"{uid}/media_publish", token, creation_id=container)["id"])
+        save_state(state, f"Instagram: historia publicada {doc_id}")
+        return True
+    except PublishError as e:
+        st["attempts"] = st.get("attempts", 0) + 1
+        last = st["attempts"] >= STORY_ATTEMPTS
+        st["status"] = "descartada" if last else "failed"
+        save_state(state, f"Instagram: falló la historia {doc_id}")
+        report_error("historia", f"{doc_id}: {e} El carrusel quedó publicado. " + (
+            "Ya se reintentó una vez: la historia se descarta." if last else
+            "La historia se reintenta una sola vez en la próxima corrida (si no pasaron 24 horas)."))
+        return False
 
 
 def run():
@@ -442,6 +513,11 @@ def run():
                 report_error("publicacion", f"Documento {doc_id}: {e}")
                 errors += 1
 
+    # historias que fallaron: un reintento (post_story decide si corresponde)
+    for doc_id, pub in list(state["published"].items()):
+        if pub.get("status") == "done" and (pub.get("story") or {}).get("status") in ("failed", "publishing"):
+            post_story(state, doc_id)
+
     # vistas previas: publicar las aprobadas en la corrida siguiente
     for doc_id, p in list(state["pending"].items()):
         try:
@@ -462,7 +538,7 @@ def run():
                 del state["pending"][doc_id]
                 save_state(state, f"Instagram: vencido {doc_id}")
                 continue
-            permalink = publish_doc(state, doc_id, p["images"], p["caption"])
+            permalink = publish_doc(state, doc_id, p["images"], p["caption"], p.get("story"))
             comment(p["issue"], f"Publicado en Instagram: {permalink}")
             close_issue(p["issue"])
             del state["pending"][doc_id]
@@ -492,8 +568,8 @@ def run():
                 if prep is None:
                     print(f"{doc_id}: sin ítems de alcance general; no se publica.")
                 else:
-                    doc, urls, caption = prep
-                    enqueue(state, doc_id, "od", od_label(doc), urls, caption)
+                    doc, urls, caption, story = prep
+                    enqueue(state, doc_id, "od", od_label(doc), urls, caption, story=story)
                     if key:
                         state["sessions"].append(key)
             state["seen"].append(doc_id)  # solo si se resolvió; si falló, se reintenta mañana
@@ -623,9 +699,9 @@ def od_preview(session_number, year, stamp):
     prep = prepare(rec["doc_id"], f"prueba/{rec['doc_id']}-{stamp}")
     if prep is None:
         doc = load_processed_json(DATASET_REPO_ID, rec["doc_id"]) or {}
-        return [(od_label(doc), "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría.")]
-    doc, urls, caption = prep
-    return [(od_label(doc), preview_body(urls, caption))]
+        return [(od_label(doc), "**PRUEBA:** esta orden del día no tiene ítems de alcance general, así que no se publicaría.", None)]
+    doc, urls, caption, story = prep
+    return [(od_label(doc), preview_body(urls, caption, story=story), story)]
 
 
 def prensa_preview(session, year, kind, stamp):
@@ -637,16 +713,17 @@ def prensa_preview(session, year, kind, stamp):
         raise PublishError(f"No hay notas de Prensa con temas aprobados en la sesión {session} de {year}.")
     if kind == "aprobado":
         r = prepare_aprobado(s, f"prueba/aprobado-{key}-{stamp}")
-        return [(r[0], preview_body(r[1], r[2])) if r else
-                (f"Qué se aprobó · sesión {session}", "**PRUEBA:** ninguna nota de esta sesión dio un resumen usable.")]
+        return [(r[0], preview_body(r[1], r[2], story=r[4]), r[4]) if r else
+                (f"Qué se aprobó · sesión {session}", "**PRUEBA:** ninguna nota de esta sesión dio un resumen usable.", None)]
     notes = prensa.rank(destacables(s, now().date()))[:3]
     if not notes:
         return [(f"Destacado · sesión {session}", "**PRUEBA:** esta sesión no tiene notas aprobadas de Bolsillo, "
-                                                 "Servicios u Obras con un plazo vigente, así que no habría destacado.")]
+                                                 "Servicios u Obras con un plazo vigente, así que no habría destacado.", None)]
     out = []
     for n in notes:
         r = prepare_destacado(s, n, f"prueba/destacado-{n['id']}-{stamp}")
-        out.append((r[0], preview_body(r[1], r[2])) if r else (f"Destacado · {n['title']}", "**PRUEBA:** sin texto usable."))
+        out.append((r[0], preview_body(r[1], r[2], story=r[4]), r[4]) if r else
+                   (f"Destacado · {n['title']}", "**PRUEBA:** sin texto usable.", None))
     return out
 
 
@@ -659,15 +736,15 @@ def boletin_preview(session, year, stamp):
              if c[1]["key"] == key]
     if not cands:
         return [(f"Boletín · sesión {session}", "**PRUEBA:** el Boletín Oficial todavía no tiene ordenanzas de esta sesión "
-                                               "con tema de fondo o de Bolsillo, así que no habría destacado.")]
+                                               "con tema de fondo o de Bolsillo, así que no habría destacado.", None)]
     out = [(f"Boletín · Ordenanza {n['ordenanza']['label']}",
-            f"**PRUEBA:** no saldría: es {status} con la nota [{best['id']}]({best['link']}) de Prensa.")
+            f"**PRUEBA:** no saldría: es {status} con la nota [{best['id']}]({best['link']}) de Prensa.", None)
            for n, _, status, best in cands if status != "nueva"]
     for n in prensa.rank([n for n, _, status, _ in cands if status == "nueva"])[:3]:
         s = next(s for m, s, _, _ in cands if m is n)
         r = prepare_destacado(s, n, f"prueba/{n['id']}-{stamp}")
-        out.append((r[0], preview_body(r[1], r[2])) if r else (f"Boletín · Ordenanza {n['ordenanza']['label']}",
-                                                               "**PRUEBA:** sin texto usable."))
+        out.append((r[0], preview_body(r[1], r[2], story=r[4]), r[4]) if r else
+                   (f"Boletín · Ordenanza {n['ordenanza']['label']}", "**PRUEBA:** sin texto usable.", None))
     return out
 
 
@@ -685,11 +762,27 @@ def run_preview(session_number, year, tipo="orden-del-dia"):
         previews = boletin_preview(session_number, year, stamp)
     else:
         previews = prensa_preview(session_number, year, kind, stamp)
-    for label, body in previews:
+    story = next((st for _, _, st in previews if st), None)
+    story_ok = True
+    if token_ok and story:
+        story_ok, story_msg = check_story(story)
+        check += ["### Verificación de historias", "", ("✅ " if story_ok else "❌ ") + story_msg, ""]
+    for label, body, _ in previews:
         number, url = create_issue(preview_title(label, prueba=True), "\n".join(check) + "\n" + body, ["instagram-prueba"])
         print(f"Vista previa de prueba: {url}")
     print(("OK: " if token_ok else "ERROR: ") + token_msg)
-    return 0 if token_ok else 1  # en rojo en Actions si el token no sirve (el detalle está en el Issue)
+    return 0 if token_ok and story_ok else 1  # en rojo en Actions si el token no sirve (el detalle está en el Issue)
+
+
+def check_story(story_url):
+    """(ok, mensaje): crea un contenedor de historia y espera a que quede listo, sin publicarlo (vence solo)."""
+    token = ic.env_value("IG_ACCESS_TOKEN")
+    try:
+        uid = ig("GET", "me", token, fields="user_id")["user_id"]
+        wait_finished(ig("POST", f"{uid}/media", token, image_url=story_url, media_type="STORIES")["id"], token)
+    except PublishError as e:
+        return False, f"La API no aceptó la historia: {e}"
+    return True, "La API acepta historias con este token (se creó el contenedor y quedó listo; no se publicó)."
 
 
 # ------------------------------------------------------------------ puesta al día (workflow manual)
@@ -873,14 +966,15 @@ def puesta_preview(excluir):
         shown = "\n".join([caption] + [it.get("line", "") for it in items] + [x for it in items for x in it.get("lines", [])])
         if boletin.leaks(shown):
             raise PublishError("La puesta al día nombraba a un particular: no se generó. Revisá las ordenanzas del período.")
-        urls = upload_images(paths, f"puesta-{now():%Y%m%d%H%M%S}")
+        urls, story = upload_with_story(paths, tmp, f"puesta-{now():%Y%m%d%H%M%S}", ic.story_text_puesta(start, today))
     old = state.get("puesta")
     number, url = create_issue(f"Vista previa Instagram: Puesta al día desde {ic.month_since(start, today)}",
-                               preview_body(urls, caption, head=head), ["instagram-puesta-al-dia"])
+                               preview_body(urls, caption, head=head, story=story), ["instagram-puesta-al-dia"])
     if old and old.get("status") == "preview":
         comment(old["issue"], f"Reemplazada por la vista previa #{number}.")
         close_issue(old["issue"])
-    state["puesta"] = {"issue": number, "images": urls, "caption": caption, "created_at": iso(now()), "status": "preview",
+    state["puesta"] = {"issue": number, "images": urls, "caption": caption, "story": story, "created_at": iso(now()),
+                       "status": "preview",
                        "since": start.isoformat(), "notes": [i for it in items for i in item_ids(it)]}
     save_state(state, "Instagram: vista previa de la puesta al día")
     print(f"Puesta al día: vista previa en {url}")
@@ -898,7 +992,7 @@ def puesta_publish():
     issue = gh("GET", f"/issues/{p['issue']}")
     if issue["state"] == "closed" or "no-publicar" in {lb["name"] for lb in issue["labels"]}:
         raise PublishError(f"La vista previa #{p['issue']} está cerrada o tiene `no-publicar`: no se publica.")
-    permalink = publish_doc(state, f"puesta:{p['created_at']}", p["images"], p["caption"])
+    permalink = publish_doc(state, f"puesta:{p['created_at']}", p["images"], p["caption"], p.get("story"))
     p.update(status="done", permalink=permalink)
     # sus notas no vuelven a salir como destacado
     state["seen"] += [k for k in (f"destacado:{i}" for i in p["notes"]) if k not in state["seen"]]

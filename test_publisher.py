@@ -75,6 +75,7 @@ class FakeGitHub:
 class FakeIG:
     def __init__(self):
         self.calls, self.fail_child, self.status, self.recent = [], None, {}, []  # status: estado por contenedor
+        self.fail_story, self.recent_stories = 0, []  # fail_story: cuántos intentos de historia fallan
         self.valid_tokens, self.username = {TOKEN}, "actas.sma"
 
     def __call__(self, method, path, token, **p):
@@ -84,6 +85,11 @@ class FakeIG:
         if path == "me":
             return {"user_id": "17841", "username": self.username}
         if method == "POST" and path.endswith("/media"):
+            if p.get("media_type") == "STORIES":
+                if self.fail_story:
+                    self.fail_story -= 1
+                    raise pub.IGError("Instagram: la historia no se pudo procesar", 9004)
+                return {"id": f"story{sum(1 for c in self.calls if c[2].get('media_type') == 'STORIES')}"}
             if p.get("is_carousel_item"):
                 n = sum(1 for c in self.calls if c[2].get("is_carousel_item"))
                 if n == self.fail_child:
@@ -94,6 +100,8 @@ class FakeIG:
             return {"id": "media1"}
         if method == "GET" and path.endswith("/media"):
             return {"data": self.recent}
+        if method == "GET" and path.endswith("/stories"):
+            return {"data": self.recent_stories}
         if p.get("fields") == "status_code":
             return {"status_code": self.status.get(path, "FINISHED")}
         if p.get("fields") == "permalink":
@@ -101,7 +109,11 @@ class FakeIG:
         raise AssertionError(f"llamada inesperada {method} {path}")
 
     def published(self):
-        return [c for c in self.calls if c[1].endswith("/media_publish")]
+        """Posts publicados (carruseles); las historias van aparte."""
+        return [c for c in self.calls if c[1].endswith("/media_publish") and not c[2]["creation_id"].startswith("story")]
+
+    def stories(self):
+        return [c for c in self.calls if c[1].endswith("/media_publish") and c[2]["creation_id"].startswith("story")]
 
 
 class PublisherTest(unittest.TestCase):
@@ -207,6 +219,69 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("https://www.instagram.com/p/ABC/", issue["comments"][-1])
         self.assertEqual(self.state["approved"], 1)
         self.assertEqual(self.state["published"]["nuevo"]["status"], "done")
+
+    def test_historia_despues_del_carrusel(self):
+        self.run_pub()
+        self.nueva_orden()
+        self.run_pub(1)
+        body = self.gh.issues[1]["body"]
+        self.assertIn("### Historia", body)
+        story = self.state["pending"]["nuevo"]["story"]
+        self.assertIn(f"![Historia]({story})", body)
+        self.run_pub(24)
+        self.assertEqual((len(self.ig.published()), len(self.ig.stories())), (1, 1))
+        publishes = [c[2]["creation_id"] for c in self.ig.calls if c[1].endswith("/media_publish")]
+        self.assertEqual(publishes, ["carousel1", "story1"])  # primero el carrusel, después la historia
+        self.assertEqual([c[2]["image_url"] for c in self.ig.calls if c[2].get("media_type") == "STORIES"], [story])
+        self.assertEqual(self.state["published"]["nuevo"]["story"]["status"], "done")
+        self.run_pub(48)
+        self.assertEqual(len(self.ig.stories()), 1)  # nunca dos historias del mismo post
+
+    def publicar_con_historia_que_falla(self, fallas):
+        self.run_pub()
+        self.nueva_orden()
+        self.run_pub(1)
+        self.ig.fail_story = fallas
+        self.assertEqual(self.run_pub(24), 0)  # la historia no hace fallar la corrida: el carrusel salió
+        self.assertEqual((len(self.ig.published()), len(self.ig.stories())), (1, 0))
+        self.assertEqual(self.gh.issues[1]["state"], "closed")
+        [error] = [i for i in self.gh.by_label("instagram-error") if i["title"] == "Instagram: falló la historia"]
+        self.assertIn("se reintenta una sola vez", error["body"])
+        return error
+
+    def test_historia_que_falla_se_reintenta_una_vez(self):
+        self.publicar_con_historia_que_falla(1)
+        self.run_pub(36)  # 12 horas después del carrusel
+        self.assertEqual((len(self.ig.published()), len(self.ig.stories())), (1, 1))
+
+    def test_historia_que_falla_dos_veces_se_descarta(self):
+        error = self.publicar_con_historia_que_falla(2)
+        self.run_pub(36)
+        self.assertIn("Ya se reintentó una vez: la historia se descarta.", error["comments"][-1])
+        self.run_pub(40)
+        intentos = [c for c in self.ig.calls if c[2].get("media_type") == "STORIES"]
+        self.assertEqual((len(intentos), len(self.ig.stories())), (2, 0))
+        self.assertEqual(self.state["published"]["nuevo"]["story"]["status"], "descartada")
+
+    def test_historia_despues_de_24_horas_no_se_reintenta(self):
+        error = self.publicar_con_historia_que_falla(1)
+        self.run_pub(49)  # 25 horas después del carrusel
+        self.assertEqual(len(self.ig.stories()), 0)
+        self.assertIn("pasaron 24 horas", error["comments"][-1])
+        self.assertEqual(self.state["published"]["nuevo"]["story"]["status"], "descartada")
+
+    def test_historia_a_medias_no_se_duplica(self):
+        self.run_pub()
+        self.nueva_orden()
+        self.run_pub(1)
+        self.run_pub(24)
+        st = self.state["published"]["nuevo"]["story"]
+        st.update(status="publishing", at=pub.iso(T0 + timedelta(hours=24)))  # cortada después de media_publish
+        self.hf[pub.STATE_PATH] = self.state
+        self.ig.recent_stories = [{"id": "s9", "timestamp": "2026-10-19T10:06:00+0000"}]
+        self.run_pub(30)
+        self.assertEqual(len(self.ig.stories()), 1)  # la de la corrida anterior; no se publica otra
+        self.assertEqual(self.state["published"]["nuevo"]["story"], {**st, "status": "done", "media_id": "s9"})
 
     def test_con_no_publicar_se_descarta(self):
         self.run_pub()
@@ -529,6 +604,8 @@ class PublisherTest(unittest.TestCase):
         with self.assertRaisesRegex(pub.PublishError, "ya se publicó"):
             pub.puesta_publish()
         self.assertEqual(len(self.ig.published()), 1)
+        self.assertEqual(len(self.ig.stories()), 1)  # con su historia ("Volvimos: …")
+        self.assertIn("![Historia](", self.gh.by_label("instagram-puesta-al-dia")[0]["body"])
 
     def test_puesta_nueva_vista_previa_reemplaza_la_anterior(self):
         self.run_pub()
@@ -611,7 +688,9 @@ class PublisherTest(unittest.TestCase):
         code = pub.run_preview(23, 2026)
         [issue] = self.gh.by_label("instagram-prueba")
         self.assertNotIn(TOKEN, issue["body"])
-        self.assertEqual([(m, path) for m, path, _ in self.ig.calls], [("GET", "me")] * len(self.ig.calls))  # nunca publica
+        # nunca publica: a lo sumo crea el contenedor de la historia de prueba (vence solo)
+        self.assertFalse([c for c in self.ig.calls if c[1].endswith("/media_publish")])
+        self.assertFalse([c for c in self.ig.calls if c[0] == "POST" and c[2].get("media_type") != "STORIES"])
         self.assertNotIn(pub.STATE_PATH, self.hf)
         return code, issue
 
@@ -621,6 +700,14 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("PRUEBA", issue["title"])
         self.assertIn("no se publica", issue["body"])
         self.assertIn("✅ Token válido: cuenta @actas.sma.", issue["body"])
+        self.assertIn("✅ La API acepta historias con este token", issue["body"])
+        self.assertIn("![Historia](", issue["body"])
+
+    def test_prueba_historia_rechazada(self):
+        self.ig.fail_story = 1
+        code, issue = self.preview()
+        self.assertEqual(code, 1)
+        self.assertIn("❌ La API no aceptó la historia: Instagram: la historia no se pudo procesar", issue["body"])
 
     def test_prueba_con_token_de_otra_cuenta(self):
         self.ig.username = "otra.cuenta"

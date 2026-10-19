@@ -576,6 +576,35 @@ def render_carousel(doc, out_dir, prefix="slide", simple_lines=None, ext="png"):
     return save_slides(slides, out, prefix, ext, build_caption(doc, items))
 
 
+# ------------------------------------------------------------------ historia (avisa que hay un post nuevo)
+STORY_W, STORY_H = 1080, 1920
+STORY_SAFE = (250, 1670)  # Instagram tapa arriba (perfil) y abajo (responder)
+STORY_CARD_Y = STORY_SAFE[0] + 60  # la portada ya trae la marca: arriba no va otra
+STORY_TEXT = "Nuevo post → mirá el carrusel"
+
+
+def story_text_puesta(start, today):
+    return f"Volvimos: lo más importante que aprobó el Concejo desde {month_since(start, today)}"
+
+
+def render_story(cover_path, out_path, text=STORY_TEXT):
+    """Historia 1080x1920: la portada del carrusel al 85% (con su marca) y la frase, todo en la zona segura.
+    Fondo: el color de la portada, más oscuro, para que la portada se lea como una tarjeta."""
+    card = Image.open(cover_path).convert("RGB")
+    bg = tuple(int(c * 0.72) for c in card.getpixel((W - 5, H // 2)))
+    img = Image.new("RGB", (STORY_W, STORY_H), bg)
+    d = ImageDraw.Draw(img)
+    bottom = STORY_SAFE[1]
+    card = card.resize((round(W * 0.85), round(H * 0.85)), Image.LANCZOS)
+    y = STORY_CARD_Y
+    img.paste(card, ((STORY_W - card.width) // 2, y))
+    y += card.height + 36
+    f, lines, lh = fit_text(d, text, STORY_W - 2 * M, bottom - y, sizes=(48, 44, 40, 36), bold=True)
+    draw_lines(d, (M, y), lines, f, lh, "white", center=True)
+    img.save(out_path, quality=90, optimize=True)
+    return Path(out_path)
+
+
 def save_slides(slides, out, prefix, ext, caption):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)

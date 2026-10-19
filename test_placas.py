@@ -141,6 +141,44 @@ class SinSuperposicionTest(unittest.TestCase):
             self.verificar(f"puesta al día, {tipo}",
                            lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out, audiencias=auds))
 
+    def test_historia(self):
+        """1080x1920, marca y frase dentro de la zona segura, la frase debajo de la portada; los cuatro tipos."""
+        from datetime import date
+        from PIL import Image
+        s = prensa.sessions(NOTAS)["2026-O23"]
+        sdoc = prensa.session_doc(s)
+        campos = {"titular": "Baja la tasa comercial", "que_cambia": "", "a_quien_afecta": "", "desde_cuando": ""}
+        od = {"session_number": "23", "session_year": 2026, "date": "08/10/2026", "items": [
+            {"key": "1492/2026", "que_dice": "Modificación Ordenanza 4166/2001 Tarifa taxis y remisses.",
+             "title": "Modificación Ordenanza 4166/2001 Tarifa taxis y remisses.", "impact_tags": ["💰 Bolsillo"]}]}
+        renders = {
+            "orden del día": lambda out: ic.render_carousel(od, out, simple_lines=[None]),
+            "qué se aprobó": lambda out: ic.render_aprobado(sdoc, [{**s["notes"][0], "line": TEXTOS["corto"]}], out),
+            "destacado": lambda out: ic.render_destacado(sdoc, campos, ["💰 Bolsillo"], out),
+            "puesta al día": lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), [], out),
+        }
+        frases = [ic.STORY_TEXT, ic.story_text_puesta(date(2026, 6, 1), date(2026, 10, 18)), ic.shorten(LARGO, 160)]
+        top, bottom = ic.STORY_SAFE
+        for tipo, render in renders.items():
+            for frase in frases:
+                with tempfile.TemporaryDirectory() as out:
+                    cover = render(out)[0]
+                    with TextosDibujados() as reg:
+                        path = ic.render_story(cover, Path(out) / "historia.jpg", frase)
+                    with Image.open(path) as im:
+                        self.assertEqual(im.size, (ic.STORY_W, ic.STORY_H))
+                        fondo = im.getpixel((5, ic.STORY_H // 2))
+                [(placa, textos)] = reg.por_placa.items()
+                self.assertNotIn(placa, reg.imagenes)  # solo la marca de la portada, no otra arriba
+                card_bottom = ic.STORY_CARD_Y + round(ic.H * 0.85)
+                self.assertGreaterEqual(ic.STORY_CARD_Y, top)
+                if frase != frases[-1]:  # las frases reales entran enteras
+                    self.assertEqual(" ".join(t for _, t in textos), frase)
+                for box, t in textos:
+                    self.assertTrue(card_bottom <= box[1] and box[3] <= bottom and 0 <= box[0] and box[2] <= ic.STORY_W,
+                                    f"historia {tipo}: '{t}' fuera de la zona segura o sobre la portada")
+                self.assertLess(sum(fondo), 3 * 200, tipo)  # fondo oscuro: la frase blanca se lee
+
     def test_si_no_entra_achica_o_recorta(self):
         blocks = [ic.text_block(LARGO, (72, 60, 48), ic.INK, 44, 900, bold=True),
                   ic.text_block(LARGO, (40, 36), ic.MUTED, 44, 600)] + ic.impact_blocks(["💰 Bolsillo"], LARGO)
