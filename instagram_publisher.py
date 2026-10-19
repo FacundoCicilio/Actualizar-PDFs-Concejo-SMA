@@ -4,6 +4,8 @@
 #   python instagram_publisher.py                          # corrida normal
 #   python instagram_publisher.py --prueba 23 [--anio 2026] [--tipo que-se-aprobo]  # Issue de vista previa: no publica
 #                                                                                   # ni toca el estado
+#   python instagram_publisher.py --puesta [--excluir 1782,1601]  # vista previa de la "puesta al día" (Issue)
+#   python instagram_publisher.py --puesta --publicar sí         # publica esa vista previa, tal cual se revisó
 # Período de prueba, por tipo de post: cada post nuevo abre un Issue; si no tiene la etiqueta "no-publicar", la corrida
 # diaria siguiente lo publica. Después de 3 publicaciones aprobadas así de ese tipo, ese tipo pasa a publicar directo.
 # Estado y token viven en el dataset privado de HF. Nunca se imprime ni se reporta un token.
@@ -35,7 +37,9 @@ APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen la
 TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado"}
 KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos",
               "destacado": "los destacados nuevos"}
-LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5"}
+LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5",
+          "instagram-puesta-al-dia": "4B2E6F"}
+PUESTA_DEFAULT_START = date(2026, 6, 1)  # si no se puede saber la fecha del último post
 ERROR_TITLES = {
     "token": "Instagram: problema con el token",
     "publicacion": "Instagram: falló la publicación",
@@ -340,10 +344,10 @@ def preview_title(label, prueba=False):
     return f"{'PRUEBA ' if prueba else 'Vista previa '}Instagram: {label}"
 
 
-def preview_body(urls, caption, deadline=None, approved=None):
-    if deadline is None:
+def preview_body(urls, caption, deadline=None, approved=None, head=None):
+    if head is None and deadline is None:
         head = ["**PRUEBA: esta vista previa no se publica.**"]
-    else:
+    elif head is None:
         when = f"{deadline:%d/%m} a las {deadline:%H:%M} UTC ({(deadline - timedelta(hours=3)):%H:%M} en Argentina)"
         head = [f"Se publica en Instagram en la próxima corrida del cron: **{when}** (puede demorar unos minutos).", "",
                 "**Si no querés que se publique, poné la etiqueta `no-publicar`** (o cerrá este Issue) antes de esa hora."]
@@ -605,13 +609,124 @@ def run_preview(session_number, year, tipo="orden-del-dia"):
     return 0 if token_ok else 1  # en rojo en Actions si el token no sirve (el detalle está en el Issue)
 
 
+# ------------------------------------------------------------------ puesta al día (workflow manual)
+
+def period_start():
+    """(fecha, explicación) del inicio de la puesta al día: el día del último post de la cuenta, o el 1/6/2026."""
+    try:
+        token = get_token()
+        media = ig("GET", f"{user_id(token)}/media", token, fields="timestamp", limit=1).get("data", [])
+    except PublishError as e:
+        return PUESTA_DEFAULT_START, f"no se pudo consultar Instagram ({e}); se usa el 1/6/2026"
+    if not media or not media[0].get("timestamp"):
+        return PUESTA_DEFAULT_START, "la cuenta no tiene posts; se usa el 1/6/2026"
+    last = datetime.strptime(media[0]["timestamp"], "%Y-%m-%dT%H:%M:%S%z")
+    return last.date(), f"fecha del último post de @{IG_USERNAME}"
+
+
+def puesta_items(notes, start, today, excluir, skip_keys):
+    """Notas que serían destacado, de sesiones entre start y today, sin plazo vencido, sin las excluidas ni las ya
+    publicadas como destacado; las de mayor impacto primero. Devuelve (ítems para las placas, notas descartadas)."""
+    sessions = prensa.sessions(notes)
+    candidates = [(n, s) for s in sessions.values() if start <= s["date"] <= today
+                  for n in destacables(s, today) if str(n["id"]) not in excluir and f"destacado:{n['id']}" not in skip_keys]
+    ranked = prensa.rank([n for n, _ in candidates])
+    session_of = {n["id"]: s for n, s in candidates}
+    items, dropped = [], []
+    for n in ranked:
+        if len(items) == ic.MAX_ITEMS:
+            break
+        s = session_of[n["id"]]
+        text = prensa.note_text(n)
+        fields, error = ic.destacado(text)
+        if error:
+            raise AnthropicFailure(f"{error} No se generó la puesta al día; corré el workflow de nuevo más tarde.")
+        line = fields and (fields["que_cambia"] or ic.note_line(text))
+        if not line:
+            dropped.append(n)
+            continue
+        items.append({"note": n, "sdoc": prensa.session_doc(s), "titular": fields["titular"], "line": line,
+                      "impact_tags": n["impact_tags"]})
+    return items, dropped
+
+
+def puesta_preview(excluir):
+    state = load_json(DATASET_REPO_ID, STATE_PATH)
+    if state is None:
+        raise PublishError("Todavía no hay estado de Instagram: tiene que correr primero el cron diario.")
+    ensure_setup()
+    start, why = period_start()
+    today = now().date()
+    items, dropped = puesta_items(prensa.load_notes(), start, today, excluir,
+                                  set(state["seen"]) | set(state["pending"]) | set(state["published"]))
+    head = [f"Período: sesiones desde el **{start:%d/%m/%Y}** ({why}) hasta hoy.", ""]
+    if excluir:
+        head += [f"Notas excluidas a pedido: {', '.join(sorted(excluir))}.", ""]
+    if dropped:
+        head += [f"Sin texto usable (quedan afuera): {', '.join(str(n['id']) for n in dropped)}.", ""]
+    if not items:
+        number, url = create_issue("Vista previa Instagram: Puesta al día", "\n".join(head + [
+            "No hay notas de Bolsillo, Servicios u Obras con un plazo vigente en ese período: no hay nada para publicar."]),
+            ["instagram-puesta-al-dia"])
+        print(f"Puesta al día sin notas: {url}")
+        return 0
+    head += ["### Notas incluidas (id para el campo `excluir`)", ""]
+    head += [f"- `{it['note']['id']}` {it['titular']} — [nota]({it['note']['link']})" for it in items]
+    head += ["", "**No se publica nada todavía.** Si está bien, corré el workflow **Puesta al día** con `publicar = sí`: "
+                 "publica exactamente estas placas y este texto. Para sacar notas, corrélo de nuevo con `excluir`."]
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = ic.render_puesta(start, today, items, tmp, ext="jpg")
+        caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        urls = upload_images(paths, f"puesta-{now():%Y%m%d%H%M%S}")
+    old = state.get("puesta")
+    number, url = create_issue(f"Vista previa Instagram: Puesta al día desde {ic.month_since(start, today)}",
+                               preview_body(urls, caption, head=head), ["instagram-puesta-al-dia"])
+    if old and old.get("status") == "preview":
+        comment(old["issue"], f"Reemplazada por la vista previa #{number}.")
+        close_issue(old["issue"])
+    state["puesta"] = {"issue": number, "images": urls, "caption": caption, "created_at": iso(now()), "status": "preview",
+                       "since": start.isoformat(), "notes": [it["note"]["id"] for it in items]}
+    save_state(state, "Instagram: vista previa de la puesta al día")
+    print(f"Puesta al día: vista previa en {url}")
+    return 0
+
+
+def puesta_publish():
+    """Publica la última vista previa, sin regenerarla. No cuenta para el período de prueba de ningún tipo."""
+    state = load_json(DATASET_REPO_ID, STATE_PATH) or {}
+    p = state.get("puesta")
+    if not p:
+        raise PublishError("No hay vista previa de la puesta al día: corré el workflow con publicar = no.")
+    if p["status"] == "done":
+        raise PublishError(f"Esta puesta al día ya se publicó: {p.get('permalink', '')}")
+    issue = gh("GET", f"/issues/{p['issue']}")
+    if issue["state"] == "closed" or "no-publicar" in {lb["name"] for lb in issue["labels"]}:
+        raise PublishError(f"La vista previa #{p['issue']} está cerrada o tiene `no-publicar`: no se publica.")
+    permalink = publish_doc(state, f"puesta:{p['created_at']}", p["images"], p["caption"])
+    p.update(status="done", permalink=permalink)
+    # sus notas no vuelven a salir como destacado
+    state["seen"] += [k for k in (f"destacado:{i}" for i in p["notes"]) if k not in state["seen"]]
+    save_state(state, "Instagram: puesta al día publicada")
+    comment(p["issue"], f"Publicado en Instagram: {permalink}")
+    close_issue(p["issue"])
+    print(f"Puesta al día publicada: {permalink}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Publica en Instagram las órdenes del día nuevas y los posts de Prensa.")
     ap.add_argument("--prueba", metavar="N", help="número de sesión (E1 = Sesión Especial 1): abre un Issue de vista previa, sin publicar")
     ap.add_argument("--anio", type=int, default=now().year)
     ap.add_argument("--tipo", choices=list(TIPOS), default="orden-del-dia")
+    ap.add_argument("--puesta", action="store_true", help="puesta al día: vista previa por Issue (o publicarla con --publicar sí)")
+    ap.add_argument("--publicar", choices=["no", "sí", "si"], default="no")
+    ap.add_argument("--excluir", default="", help="ids de notas de Prensa separados por coma")
     args = ap.parse_args()
     try:
+        if args.puesta:
+            if args.publicar != "no":
+                return puesta_publish()
+            return puesta_preview({x.strip() for x in args.excluir.split(",") if x.strip()})
         return run_preview(args.prueba, args.anio, args.tipo) if args.prueba else run()
     except PublishError as e:
         report_error("otro", str(e))

@@ -368,6 +368,89 @@ class PublisherTest(unittest.TestCase):
         [err] = self.gh.by_label("instagram-error")
         self.assertEqual(err["title"], pub.ERROR_TITLES["prensa"])
 
+    # --- puesta al día
+    def puesta_notas(self, n=3):
+        """Sesión 22 (antes del último post, 10/10) y sesión 25 (después): solo cuentan las de la 25."""
+        self.notes["50"] = nota(50, 22, 1, TASA)
+        for i in range(n):
+            self.notes[str(60 + i)] = nota(60 + i, 25, 15, f"{TASA} número {i}")
+        self.notes["70"] = nota(70, 25, 15, "El Plan de Regularización de Deudas Municipales",
+                                vigencia="Regirá desde el 1 y hasta el 16 de octubre de 2026.")  # vencido el 18/10
+        self.ig.recent = [{"id": "m1", "timestamp": "2026-10-10T15:30:00+0000", "caption": "Último post"}]
+
+    def test_puesta_vista_previa_no_publica(self):
+        self.run_pub()
+        self.puesta_notas()
+        self.assertEqual(pub.puesta_preview({"61"}), 0)
+        [issue] = self.gh.by_label("instagram-puesta-al-dia")
+        self.assertEqual(issue["title"], "Vista previa Instagram: Puesta al día desde octubre")
+        self.assertIn("desde el **10/10/2026** (fecha del último post de @concejo.sma)", issue["body"])
+        self.assertIn("Notas excluidas a pedido: 61.", issue["body"])
+        self.assertIn("`60`", issue["body"])
+        self.assertIn("`62`", issue["body"])
+        for fuera in ("`50`", "`61`", "`70`"):  # sesión anterior al período, excluida, plazo vencido
+            self.assertNotIn(fuera, issue["body"])
+        self.assertIn("![Placa 4]", issue["body"])  # portada + 2 notas + cierre
+        self.assertNotIn("![Placa 5]", issue["body"])
+        self.assertEqual(self.ig.published(), [])
+        self.assertEqual(self.state["puesta"]["notes"], [60, 62])
+
+    def test_puesta_sin_dato_de_instagram_usa_el_1_de_junio(self):
+        self.run_pub()
+        self.puesta_notas()
+        self.ig.valid_tokens = set()
+        pub.puesta_preview(set())
+        [issue] = self.gh.by_label("instagram-puesta-al-dia")
+        self.assertIn("desde el **01/06/2026**", issue["body"])
+        self.assertIn("`50`", issue["body"])  # la sesión 22 ahora entra
+        self.assertNotIn(TOKEN, issue["body"])
+
+    def test_puesta_maximo_8(self):
+        self.run_pub()
+        self.puesta_notas(n=11)
+        pub.puesta_preview(set())
+        [issue] = self.gh.by_label("instagram-puesta-al-dia")
+        self.assertIn("![Placa 10]", issue["body"])
+        self.assertNotIn("![Placa 11]", issue["body"])
+
+    def test_puesta_publica_lo_revisado_una_sola_vez(self):
+        self.run_pub()
+        self.puesta_notas()
+        pub.puesta_preview(set())
+        caption, images = self.state["puesta"]["caption"], self.state["puesta"]["images"]
+        self.assertEqual(pub.puesta_publish(), 0)
+        [publish] = self.ig.published()
+        carousel = next(c for c in self.ig.calls if c[2].get("media_type") == "CAROUSEL")
+        self.assertEqual(carousel[2]["caption"], caption)
+        self.assertEqual([c[2]["image_url"] for c in self.ig.calls if c[2].get("is_carousel_item")], images)
+        self.assertEqual(self.gh.by_label("instagram-puesta-al-dia")[0]["state"], "closed")
+        self.assertIn("destacado:60", self.state["seen"])  # no vuelve a salir como destacado
+        self.assertEqual((self.state["approved"], self.state.get("review", {})), (0, {}))  # no cuenta para ningún período de prueba
+        with self.assertRaisesRegex(pub.PublishError, "ya se publicó"):
+            pub.puesta_publish()
+        self.assertEqual(len(self.ig.published()), 1)
+
+    def test_puesta_nueva_vista_previa_reemplaza_la_anterior(self):
+        self.run_pub()
+        self.puesta_notas()
+        pub.puesta_preview(set())
+        pub.puesta_preview({"60"})
+        primera, segunda = self.gh.by_label("instagram-puesta-al-dia")
+        self.assertEqual(primera["state"], "closed")
+        self.assertIn(f"#{segunda['number']}", primera["comments"][-1])
+        self.assertEqual(self.state["puesta"]["issue"], segunda["number"])
+
+    def test_puesta_no_publica_sin_vista_previa_o_con_no_publicar(self):
+        self.run_pub()
+        with self.assertRaisesRegex(pub.PublishError, "No hay vista previa"):
+            pub.puesta_publish()
+        self.puesta_notas()
+        pub.puesta_preview(set())
+        self.gh.by_label("instagram-puesta-al-dia")[0]["labels"].append({"name": "no-publicar"})
+        with self.assertRaisesRegex(pub.PublishError, "no-publicar"):
+            pub.puesta_publish()
+        self.assertEqual(self.ig.published(), [])
+
     # --- token
     def test_token_se_renueva_cuando_faltan_menos_de_15_dias(self):
         self.hf[pub.TOKEN_PATH]["expires_at"] = pub.iso(T0 + timedelta(days=10))

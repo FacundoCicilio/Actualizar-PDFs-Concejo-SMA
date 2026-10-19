@@ -1,0 +1,42 @@
+name: Puesta al día
+on:
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "no = solo vista previa (Issue). sí = publica la última vista previa, tal cual"
+        type: choice
+        options: ["no", "sí"]
+        default: "no"
+      excluir:
+        description: "Ids de notas de Prensa a dejar afuera, separados por coma (por ejemplo 1782,1601)"
+        required: false
+concurrency:
+  group: instagram  # mismo grupo que el cron: nunca corren a la vez
+  cancel-in-progress: false
+jobs:
+  puesta:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # rama instagram-media
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+      - name: Puesta al día
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLICAR: ${{ inputs.publicar }}
+          EXCLUIR: ${{ inputs.excluir }}
+        run: |
+          python instagram_publisher.py --puesta --publicar "$PUBLICAR" --excluir "$EXCLUIR"

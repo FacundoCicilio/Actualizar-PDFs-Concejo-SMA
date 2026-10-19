@@ -88,6 +88,16 @@ class SinSuperposicionTest(unittest.TestCase):
                     self.verificar(f"destacado {key} nota {nota['id']}, {tipo}",
                                    lambda out: ic.render_destacado(sdoc, c, nota["impact_tags"], out))
 
+    def test_puesta_al_dia(self):
+        from datetime import date
+        sesiones = prensa.sessions(NOTAS)
+        notas = [(n, s) for key in ("2026-O18", "2026-O23") for s in [sesiones[key]] for n in prensa.rank(s["notes"])]
+        for tipo, texto in TEXTOS.items():
+            items = [{"sdoc": prensa.session_doc(s), "titular": texto if tipo == "largo" else "El Concejo modificó la Tasa COM",
+                      "line": texto, "impact_tags": n["impact_tags"]} for n, s in notas]
+            self.verificar(f"puesta al día, {tipo}",
+                           lambda out: ic.render_puesta(date(2026, 6, 1), date(2026, 10, 18), items, out))
+
     def test_si_no_entra_achica_o_recorta(self):
         blocks = [ic.text_block(LARGO, (72, 60, 48), ic.INK, 44, 900, bold=True),
                   ic.text_block(LARGO, (40, 36), ic.MUTED, 44, 600)] + ic.impact_blocks(["💰 Bolsillo"], LARGO)

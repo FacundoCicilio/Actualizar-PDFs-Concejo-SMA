@@ -28,6 +28,7 @@ ACCENT = "#1F4E79"
 ACCENT_SOFT = "#C9D8E8"
 APROBADO = ("#2E6B3F", "#CFE3D4")   # acento (fondo) y suave de "Qué se aprobó": se distingue del azul del orden del día
 DESTACADO = ("#8A4B0F", "#F1DCC4")
+PUESTA = ("#4B2E6F", "#DCD0EA")
 FUENTE = "Fuente: Prensa del Concejo Deliberante (prensacd.cdsma.gob.ar)"
 
 # Peso de cada impacto para ordenar los ítems: primero lo que toca el bolsillo y los servicios.
@@ -703,6 +704,60 @@ def render_destacado(sdoc, fields, tags, out_dir, prefix="destacado", ext="png")
     """Dos placas (la API de Instagram publica un carrusel con 2 o más imágenes; así se reusa el mismo circuito)."""
     slides = [destacado_cover(sdoc, fields, tags), destacado_slide(sdoc, fields)]
     return save_slides(slides, out_dir, prefix, ext, destacado_caption(sdoc, fields))
+
+
+# ------------------------------------------------------------------ puesta al día (un solo post para retomar la cuenta)
+def month_since(start, today):
+    """"junio" si es el mismo año que hoy; si no, "diciembre de 2025"."""
+    month = next(name for name, num in MONTHS.items() if num == start.month and name != "setiembre")
+    return month if start.year == today.year else f"{month} de {start.year}"
+
+
+def puesta_cover(start, today, n):
+    accent, soft = PUESTA
+    img = Image.new("RGB", (W, H), accent)
+    d = ImageDraw.Draw(img)
+    brand_bar(d, "white")
+    d.line((M, 130, W - M, 130), fill=soft, width=2)
+    d.text((M, 330), "PUESTA AL DÍA", font=font(40, True), fill=soft)
+    f, ls, lh = fit_text(d, "Lo más importante que aprobó el Concejo", W - 2 * M, 360, sizes=(96, 88, 80, 72), bold=True)
+    y = draw_lines(d, (M, 420), ls, f, lh, "white") + 20
+    d.text((M, y), f"desde {month_since(start, today)}", font=font(56), fill="white")
+    y += 120
+    d.line((M, y, M + 140, y), fill=soft, width=6)
+    f, ls, lh = fit_text(d, "Concejo Deliberante de San Martín de los Andes", W - 2 * M, 110, sizes=(40,))
+    draw_lines(d, (M, y + 50), ls, f, lh, soft)
+    d.text((M, H - 150), f"{n} tema{'s' if n != 1 else ''} destacado{'s' if n != 1 else ''}  →", font=font(40, True), fill="white")
+    return img
+
+
+def puesta_slide(item, pos, n, page, total):
+    """item: {sdoc, titular, line, impact_tags}."""
+    sdoc = item["sdoc"]
+    tags = (item.get("impact_tags") or [])[:2]
+    blocks = [text_block(f"{session_title(sdoc)} · {date_long(sdoc['date'])}".upper(), (32, 28), PUESTA[0], 28, bold=True),
+              text_block(item["titular"], (60, 56, 52, 48, 44), INK, 32, 300, bold=True),
+              text_block("En criollo:", (36,), PUESTA[0], 8, bold=True),
+              text_block(item["line"], (44, 40, 36, 34, 32), INK, 44, 320)]
+    blocks += impact_blocks(tags, IMPACT_MESSAGES.get(tags[0], "") if tags else "")
+    return content_slide(f"Puesta al día · {pos} de {n}", blocks, "Fuente: Prensa del Concejo Deliberante", f"{page}/{total}", PUESTA[0])
+
+
+def puesta_caption(start, today, items):
+    lines = [f"🗓️ Puesta al día: lo más importante que aprobó el Concejo desde {month_since(start, today)}", ""]
+    lines += [f"• {it['titular']} ({session_title(it['sdoc'])}, {date_long(it['sdoc']['date'])})" for it in items]
+    lines += ["", "Deslizá para ver el detalle 👉", FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    return "\n".join(lines)
+
+
+def render_puesta(start, today, items, out_dir, prefix="puesta", ext="png"):
+    """Portada + hasta MAX_ITEMS placas (ya ordenadas por impacto) + cierre."""
+    items = items[:MAX_ITEMS]
+    total = len(items) + 2
+    slides = [puesta_cover(start, today, len(items))]
+    slides += [puesta_slide(it, i, len(items), i + 1, total) for i, it in enumerate(items, start=1)]
+    slides.append(closing(PUESTA))
+    return save_slides(slides, out_dir, prefix, ext, puesta_caption(start, today, items))
 
 
 def load_doc(path):
