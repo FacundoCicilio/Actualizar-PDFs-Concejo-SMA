@@ -28,7 +28,7 @@ STATE_PATH = "instagram/state.json"
 TOKEN_PATH = "instagram/token.json"  # aparte del estado: el estado puede terminar citado en un Issue, el token nunca
 MEDIA_BRANCH = "instagram-media"     # imágenes públicas para Instagram; un push acá no dispara el deploy del Space
 GRAPH = "https://graph.instagram.com/v25.0"
-IG_USERNAME = "concejo.sma"  # cuenta en la que se publica: la prueba verifica que el token sea de esta cuenta
+IG_USERNAME = "actas.sma"  # cuenta en la que se publica: la prueba verifica que el token sea de esta cuenta
 REVIEW_APPROVALS = 3
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
 REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación

@@ -75,7 +75,7 @@ class FakeGitHub:
 class FakeIG:
     def __init__(self):
         self.calls, self.fail_child, self.status, self.recent = [], None, {}, []  # status: estado por contenedor
-        self.valid_tokens, self.username = {TOKEN}, "concejo.sma"
+        self.valid_tokens, self.username = {TOKEN}, "actas.sma"
 
     def __call__(self, method, path, token, **p):
         self.calls.append((method, path, p))
@@ -384,7 +384,7 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(pub.puesta_preview({"61"}), 0)
         [issue] = self.gh.by_label("instagram-puesta-al-dia")
         self.assertEqual(issue["title"], "Vista previa Instagram: Puesta al día desde octubre")
-        self.assertIn("desde el **10/10/2026** (fecha del último post de @concejo.sma)", issue["body"])
+        self.assertIn("desde el **10/10/2026** (fecha del último post de @actas.sma)", issue["body"])
         self.assertIn("Notas excluidas a pedido: 61.", issue["body"])
         self.assertIn("`60`", issue["body"])
         self.assertIn("`62`", issue["body"])
@@ -520,13 +520,13 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("PRUEBA", issue["title"])
         self.assertIn("no se publica", issue["body"])
-        self.assertIn("✅ Token válido: cuenta @concejo.sma.", issue["body"])
+        self.assertIn("✅ Token válido: cuenta @actas.sma.", issue["body"])
 
     def test_prueba_con_token_de_otra_cuenta(self):
         self.ig.username = "otra.cuenta"
         code, issue = self.preview()
         self.assertEqual(code, 1)
-        self.assertIn("❌ El token es de la cuenta @otra.cuenta, no de @concejo.sma.", issue["body"])
+        self.assertIn("❌ El token es de la cuenta @otra.cuenta, no de @actas.sma.", issue["body"])
         self.assertIn("![Placa 1]", issue["body"])  # la vista previa sale igual
 
     def test_prueba_con_token_invalido(self):
