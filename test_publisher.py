@@ -246,6 +246,11 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(error["title"], "Instagram: el texto del post es demasiado largo")
         self.assertIn("Instagram admite hasta 100", error["body"])
 
+    def test_clave_de_sesion_especial(self):
+        self.assertEqual(pub.session_key(rec("a", 1)), "2026-1")  # ordinaria: la clave de siempre (no se republica)
+        self.assertEqual(pub.session_key({**rec("b", 1), "session_kind": "Ordinaria"}), "2026-1")
+        self.assertEqual(pub.session_key({**rec("c", 1), "session_kind": "Especial"}), "2026-E1")  # no choca con la S.O. 1
+
     def test_historia_despues_del_carrusel(self):
         self.run_pub()
         self.nueva_orden()

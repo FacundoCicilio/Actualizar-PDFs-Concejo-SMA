@@ -11,7 +11,7 @@ from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 
 DATASET_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or "Facucici/actas-sma-data"
 INDEX_PATH = "index/index.json"
-PROCESSOR_VERSION = 31  # única versión para app y cron: subirla hace que el cron reprocese lo anterior
+PROCESSOR_VERSION = 32  # única versión para app y cron: subirla hace que el cron reprocese lo anterior
 DEBUG = os.getenv("DEBUG", "1").strip().lower() in {"1", "true", "yes", "y"}
 
 # Leídos al llamar, no al importar: en Streamlit los secrets pasan a env recién tras el primer acceso a st.secrets.
@@ -117,7 +117,8 @@ def rebuild_index_from_processed(repo_id):
             "doc_id": doc_id, "original_filename": original_filename,
             "pdf_path": f"raw/{doc_id}.pdf", "json_path": p,
             "created_at": payload.get("source", {}).get("processed_at") or utc_now_iso(),
-            "session_type": payload.get("session_type"), "session_number": payload.get("session_number"),
+            "session_type": payload.get("session_type"), "session_kind": payload.get("session_kind"),
+            "session_number": payload.get("session_number"),
             "session_year": payload.get("session_year"), "date": payload.get("date"),
             "topics": payload.get("topics", []), "source_url": payload.get("source_url"),
             "sha256": payload.get("sha256"),
@@ -208,7 +209,8 @@ def upload_pdf_and_json(repo_id, doc_id, pdf_bytes, processed_json, original_fil
         "doc_id": doc_id, "original_filename": original_filename,
         "pdf_path": pdf_path, "json_path": json_path,
         "created_at": datetime.utcnow().isoformat() + "Z",
-        "session_type": processed_json.get("session_type"), "session_number": processed_json.get("session_number"),
+        "session_type": processed_json.get("session_type"), "session_kind": processed_json.get("session_kind"),
+        "session_number": processed_json.get("session_number"),
         "session_year": processed_json.get("session_year"), "date": processed_json.get("date"),
         "topics": processed_json.get("topics", []), "source_url": source_url, "sha256": sha256_digest,
     }

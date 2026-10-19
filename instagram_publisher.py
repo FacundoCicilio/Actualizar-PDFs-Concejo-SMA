@@ -298,7 +298,11 @@ def user_id(token):
 # ------------------------------------------------------------------ carrusel y Issues
 
 def session_key(rec):
-    return f"{rec['session_year']}-{rec['session_number']}" if rec.get("session_year") and rec.get("session_number") else None
+    """"2026-1" (ordinaria, como siempre) o "2026-E1": la especial N° 1 no es la ordinaria N° 1."""
+    if not (rec.get("session_year") and rec.get("session_number")):
+        return None
+    kind = "" if rec.get("session_kind") in (None, "Ordinaria") else rec["session_kind"][0]
+    return f"{rec['session_year']}-{kind}{rec['session_number']}"
 
 
 def prepare(doc_id, folder):

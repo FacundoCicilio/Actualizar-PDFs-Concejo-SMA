@@ -212,6 +212,10 @@ def extract_cover_lines(pdf_bytes):
     return lines
 
 
+SESSION_NUM_PAT = re.compile(r"\bSESI[OÓ]N\s+(ORDINARIA|EXTRAORDINARIA|ESPECIAL)\s+N(?:ro|°|º|o)?[:\.]?\s*0*(\d{1,3})\b",
+                             re.IGNORECASE)
+
+
 def extract_box_header_info(pdf_bytes):
     lines = extract_cover_lines(pdf_bytes)
     if not lines: return {}
@@ -219,8 +223,8 @@ def extract_box_header_info(pdf_bytes):
     stype = None
     if re.search(r"\bORDEN\s+DEL\s+D[IÍ]A\b", page_text, re.IGNORECASE): stype = "ORDEN DEL DIA"
     elif re.search(r"\bACTA\b", page_text, re.IGNORECASE): stype = "ACTA"
-    mnum = re.search(r"\bSESIO[NÓO]\s+(?:ORDINARIA|EXTRAORDINARIA|ESPECIAL)\s+N(?:ro|°|º|o)?[:\.]?\s*0*(\d{1,3})\b", page_text, re.IGNORECASE)
-    sn = str(int(mnum.group(1))) if mnum else None
+    mnum = SESSION_NUM_PAT.search(page_text)
+    sn = str(int(mnum.group(2))) if mnum else None
     my = re.search(r"\bA[ñn]o\s+(20\d{2})\b", page_text, re.IGNORECASE)
     sy = int(my.group(1)) if my else None
     dt = parse_spanish_date_any(page_text)
@@ -231,6 +235,7 @@ def extract_box_header_info(pdf_bytes):
     out = {}
     if stype: out["session_type"] = stype
     if sn: out["session_number"] = sn
+    if mnum: out["session_kind"] = mnum.group(1).capitalize()
     if sy: out["session_year"] = sy
     if date_str: out["date"] = date_str
     return out
@@ -467,6 +472,8 @@ def parse_metadata(text, filename, box):
     t = text or ""
     head = "\n".join(t.splitlines()[:200])
     session_type = box.get("session_type")
+    mkind = SESSION_NUM_PAT.search(head)
+    session_kind = box.get("session_kind") or (mkind.group(1).capitalize() if mkind else "Ordinaria")
     session_number = box.get("session_number")
     session_year = box.get("session_year")
     date_str = box.get("date")
@@ -494,7 +501,7 @@ def parse_metadata(text, filename, box):
     exped = sorted(set(re.findall(r"(?:Expediente|EXPEDIENTE)\s*(?:N[°º]\s*)?([A-Z0-9\-\./]+)", t, re.IGNORECASE)))
     council = sorted(set(re.findall(r"(?:Concejal(?:a)?|CONCEJAL(?:A)?)(?:\s+informante)?\s*[:\-]?\s+([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñÑ\.\- ]{2,60})", t, re.IGNORECASE)))
     return {
-        "session_type": session_type, "session_number": session_number,
+        "session_type": session_type, "session_kind": session_kind, "session_number": session_number,
         "session_year": session_year, "date": date_str, "time": time_str,
         "decretos": decrees[:300], "expedientes": exped[:300], "council_members": council[:300],
         "filename_inferred_number": f_num, "filename_inferred_year": f_year,

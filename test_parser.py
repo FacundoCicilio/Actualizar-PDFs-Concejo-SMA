@@ -33,6 +33,13 @@ class OrdenesDelDiaRealesTest(unittest.TestCase):
             self.assertEqual(r["session_number"], num)
             self.assertEqual(r["session_year"], 2026)
             self.assertEqual(r["date"], fecha)
+            self.assertEqual(r["session_kind"], "Ordinaria")
+
+    def test_sesion_especial(self):
+        # No hay PDF real de una especial (el Concejo no publicó la de la Sesión Especial N° 1): se prueba la cabecera.
+        from actas_parser import parse_metadata
+        meta = parse_metadata("ORDEN DEL DÍA\nSESIÓN ESPECIAL N° 1\n3 de septiembre de 2026", "orden-SE-01-26.pdf", {})
+        self.assertEqual((meta["session_kind"], meta["session_number"]), ("Especial", "1"))
 
     def test_cantidad_de_items(self):
         # Contados a mano sobre los PDFs. Si cambian, revisar los ítems antes de actualizar el número.

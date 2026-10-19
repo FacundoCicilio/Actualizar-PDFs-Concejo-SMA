@@ -26,7 +26,9 @@ from hf_dataset_store import (
     upload_pdf_and_json,
     load_index,
     download_text_file,
+    load_json,
 )
+from buscador import FUENTES, boletin_records, build_search_records_from_acta, prensa_records, search_records, suggest
 
 APP_TITLE = "Observatorio de Actas"
 APP_SUBTITLE = "Concejo Deliberante de San Martín de los Andes"
@@ -268,104 +270,6 @@ def render_item_detail(df_all, selected_key, file_tag):
                        file_name=f"item_{file_tag}_{row.get('key')}.txt", mime="text/plain", key=f"dl_{file_tag}")
 
 
-def make_snippet(text, query_norm, width=220):
-    if not text: return ""
-    t_norm = normalize_text(text)
-    i = t_norm.find(query_norm)
-    if i == -1: return (text[:width] + "…") if len(text) > width else text
-    start = max(0, i - width // 2)
-    end = min(len(text), start + width)
-    snippet = text[start:end]
-    if start > 0: snippet = "…" + snippet
-    if end < len(text): snippet = snippet + "…"
-    return snippet
-
-
-def build_search_records_from_acta(acta, doc_id):
-    year = acta.get("session_year")
-    acta_num = acta.get("session_number")
-    fecha = acta.get("date")
-    summary = acta.get("summary_citizen") or ""
-    text_preview = acta.get("text_preview") or ""
-    ents = acta.get("entities") or {}
-    people = ents.get("persons") or []
-    orgs = ents.get("orgs") or []
-    acta_blob = normalize_text(" ".join([summary, text_preview,
-                                          " ".join((acta.get("decretos") or [])[:50]),
-                                          " ".join((acta.get("expedientes") or [])[:50])]))
-    records = [{"level": "acta", "year": year, "doc_id": doc_id, "acta_num": acta_num,
-                "fecha": fecha, "item_key": None, "item_title": None, "search_blob": acta_blob,
-                "people": people, "orgs": orgs,
-                "raw_for_snippet": {"summary_citizen": summary, "text_preview": text_preview}}]
-    items = ensure_items_schema(acta.get("items") or [])
-    for it in items:
-        title = it.get("title") or ""
-        que_dice = it.get("que_dice") or ""
-        impacto = it.get("impact_text") or ""
-        decreto = it.get("decreto") or ""
-        expediente = it.get("expediente") or ""
-        blob = normalize_text(" ".join([title, que_dice, impacto, decreto, expediente]))
-        records.append({"level": "item", "year": year, "doc_id": doc_id, "acta_num": acta_num,
-                        "fecha": fecha, "item_key": str(it.get("key") or ""),
-                        "item_title": (it.get("que_dice") or it.get("title") or "")[:220],
-                        "search_blob": blob, "people": people, "orgs": orgs,
-                        "raw_for_snippet": {"title": title, "que_dice": que_dice, "impact_text": impacto,
-                                            "decreto": decreto, "expediente": expediente}})
-    return records
-
-
-def score_record(rec, qn):
-    score = 0
-    people_norm = [normalize_name(p) for p in (rec.get("people") or [])]
-    q_words = (qn or "").split()
-    strict_person = (len(q_words) == 1)
-    if strict_person:
-        if qn in people_norm: score += 220
-    else:
-        if qn in people_norm: score += 220
-        elif any(qn and qn in pn for pn in people_norm): score += 140
-    raw = rec.get("raw_for_snippet") or {}
-    title = (raw.get("que_dice") or raw.get("title") or rec.get("item_title") or "")
-    if title and qn in normalize_text(title): score += 90
-    blob = rec.get("search_blob") or ""
-    if qn and qn in blob: score += 30
-    return score
-
-
-def search_records(records, query, year_filter=None):
-    q = (query or "").strip()
-    if not q: return []
-    qn = normalize_name(q)
-    hits = []
-    for rec in records:
-        if year_filter and rec.get("year"):
-            try:
-                if int(rec["year"]) != int(year_filter): continue
-            except: continue
-        blob = rec.get("search_blob") or ""
-        people_norm = [normalize_name(p) for p in (rec.get("people") or [])]
-        q_words = (qn or "").split()
-        strict_person = (len(q_words) == 1)
-        text_match = (qn in blob)
-        if strict_person: person_match = any(qn == pn for pn in people_norm)
-        else: person_match = any(qn and (qn == pn or qn in pn) for pn in people_norm)
-        if not (text_match or person_match): continue
-        out = dict(rec)
-        out["_person_match"] = person_match
-        out["_text_match"] = text_match
-        out["_score"] = score_record(rec, qn)
-        raw = rec.get("raw_for_snippet") or {}
-        base_text = raw.get("que_dice") or raw.get("summary_citizen") or raw.get("text_preview") or raw.get("title") or ""
-        out["_snippet"] = make_snippet(base_text, normalize_text(qn))
-        hits.append(out)
-    def _date_key(x):
-        f = x.get("fecha") or ""
-        try: return datetime.fromisoformat(str(f).replace("Z", "").strip())
-        except: return datetime.min
-    hits.sort(key=lambda r: (r.get("_score", 0), _date_key(r)), reverse=True)
-    return hits
-
-
 @st.cache_data(show_spinner=False)
 def load_index_safe():
     if load_index is None: return []
@@ -386,6 +290,12 @@ def build_global_search_records():
         if not cached: continue
         cached = normalize_cached_result(cached)
         records.extend(build_search_records_from_acta(cached, doc_id=doc_id))
+    # las mismas fuentes que lee el cron de Instagram (prensa.py, boletin.py); si todavía no están, se sigue sin ellas
+    for path, build in (("prensa/notas.json", prensa_records), ("boletin/boletines.json", boletin_records)):
+        try:
+            records.extend(build(load_json(DATASET_REPO_ID, path)))
+        except Exception as e:
+            print(f"Buscador: no se pudo cargar {path} ({type(e).__name__})")
     return records
 
 
@@ -397,6 +307,7 @@ def render_global_search_tab():
     records = build_global_search_records()
     years = sorted({r.get("year") for r in records if r.get("year")}, reverse=True)
     year_opt = st.selectbox("Año", ["Todos"] + [str(y) for y in years], index=0)
+    fuentes = st.multiselect("Fuentes", list(FUENTES), default=list(FUENTES))
     with st.form("global_search_form", clear_on_submit=False):
         query = st.text_input("Buscar (texto o nombre de persona)",
                               placeholder="Ej: Pablo / Gomez / tarifa / parque…", key="global_search_q")
@@ -408,8 +319,11 @@ def render_global_search_tab():
         st.warning("Escribí algo para buscar.")
         return
     year_filter = None if year_opt == "Todos" else int(year_opt)
-    hits = search_records(records, query=query, year_filter=year_filter)
+    hits = search_records(records, query=query, year_filter=year_filter, fuentes=fuentes)
     st.caption(f"Resultados: {len(hits)} (mostrando hasta 80)")
+    if not hits:
+        alt = suggest([r for r in records if r.get("fuente") in fuentes], query)
+        if alt: st.info(f"¿Quisiste decir **{alt}**?")
     for i, h in enumerate(hits[:80], start=1):
         doc_id = h.get("doc_id")
         acta_num = h.get("acta_num") or "s/n"
@@ -417,7 +331,21 @@ def render_global_search_tab():
         fecha = h.get("fecha") or "s/f"
         level = h.get("level")
         item_key = h.get("item_key")
-        title = f"Acta {acta_num} ({year}) — {fecha}"
+        if level in ("prensa", "ordenanza"):
+            if level == "prensa":
+                title = f"📰 Nota de Prensa — {fecha} — {h['item_title'][:100]}"
+            else:
+                title = f"📜 Ordenanza {h['ordenanza']} — Boletín Oficial N° {h['boletin']} — {fecha}"
+            with st.expander(title, expanded=False):
+                if h.get("particular"):
+                    st.caption("Nombra a particulares: se muestra solo el número y la fecha.")
+                else:
+                    if level == "ordenanza" and h.get("sesion"): st.caption(f"Aprobada en la {h['sesion']}")
+                    st.write(h.get("_snippet") or "")
+                st.markdown(f"[Ver original]({h['link']}) · Fuente: {h['fuente']}")
+            continue
+        kind = h.get("session_kind")
+        title = f"Acta {'Especial ' if kind == 'Especial' else ''}{acta_num} ({year}) — {fecha}"
         if level == "item" and item_key: title += f" — Ítem {item_key}"
         with st.expander(title, expanded=False):
             if h.get("_person_match"): st.caption("✅ Coincidencia por **persona** detectada")

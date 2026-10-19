@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import time
@@ -57,6 +58,34 @@ def is_probable_document_link(text, href):
     if any(k in href_l for k in href_keywords) and any(k in text_l for k in text_keywords): return True
     return False
  
+MEDIA_API = "https://prensacd.cdsma.gob.ar/wp-json/wp/v2/media"
+# Solo sesiones especiales o extraordinarias: las ordinarias están todas en la página del año, y la biblioteca de medios
+# también guarda versiones anteriores de esos PDF (se duplicarían en el buscador).
+SPECIAL_PAT = re.compile(r"especial|extraordinaria|\bS\.?\s?E\.?\s*N", re.IGNORECASE)
+
+
+def fetch_special_media_links(year):
+    """PDF de órdenes del día de sesiones especiales subidos al sitio aunque la página del año no los enlace."""
+    out = []
+    for q in ("especial", "extraordinaria"):
+        try:
+            r = session.get(MEDIA_API, timeout=30, params={"search": q, "mime_type": "application/pdf",
+                                                           "after": f"{year}-01-01T00:00:00", "per_page": 100,
+                                                           "_fields": "source_url,title"})
+            r.raise_for_status()
+            media = r.json()
+        except (requests.RequestException, ValueError) as e:
+            log(f"⚠️ No se pudo consultar la biblioteca de medios ({type(e).__name__}): sigo solo con la página.")
+            return out
+        for m in media:
+            title = html.unescape((m.get("title") or {}).get("rendered") or "")
+            url = canonicalize_url(m.get("source_url") or "")
+            if SPECIAL_PAT.search(f"{title} {url}") and re.search(r"orden|sesi[oó]n", f"{title} {url}", re.I) \
+                    and not re.search(r"comisi", title, re.I) and url not in out:
+                out.append(url)
+    return out
+
+
 def fetch_pdf_links(page_url):
     log(f"🌐 Leyendo página: {page_url}")
     r = session.get(page_url, timeout=30)
@@ -160,6 +189,10 @@ def main():
         dbg(f"   - {r.get('doc_id')} | {r.get('original_filename')} | {r.get('source_url')}")
 
     pdf_links = fetch_pdf_links(page_url)
+    extra = [u for u in fetch_special_media_links(year) if u not in pdf_links]
+    if extra:
+        log(f"📎 Sesiones especiales en la biblioteca de medios (no enlazadas en la página): {len(extra)}")
+    pdf_links += extra
 
     uploaded_count = 0
     reprocessed_count = 0
