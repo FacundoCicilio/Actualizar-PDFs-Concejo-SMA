@@ -38,6 +38,7 @@ REVIEW_APPROVALS = 3
 STORY_ATTEMPTS = 2                   # la historia: el intento al publicar el carrusel y un solo reintento
 STORY_MAX_AGE = timedelta(hours=24)  # después, "Nuevo post" ya no tiene sentido
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
+REVIEW_WAIT_DESTACADO = timedelta(hours=2)  # revisión mínima: una corrida manual ya puede publicarlo el mismo día
 CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
 APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen las notas de la sesión
 TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado", "boletin": "boletin"}
@@ -353,8 +354,12 @@ def destacables(s, today):
     return [n for n in s["notes"] if prensa.is_destacado(n) and not prensa.vencida(n, today)]
 
 
-def next_cron_run():
-    t = now() + REVIEW_WAIT
+def review_wait(kind):
+    return REVIEW_WAIT_DESTACADO if kind == "destacado" else REVIEW_WAIT
+
+
+def next_cron_run(kind):
+    t = now() + review_wait(kind)
     run = t.replace(hour=CRON_TIME_UTC[0], minute=CRON_TIME_UTC[1], second=0, microsecond=0)
     return run if run > t else run + timedelta(days=1)
 
@@ -406,7 +411,7 @@ def enqueue(state, key, kind, label, urls, caption, until=None, story=None):
         head = ["**No se publica solo.** Para publicarlo, poné la etiqueta `publicar`: sale en la próxima corrida del cron. "
                 "Para descartarlo, poné `no-publicar` o cerrá este Issue."] if approval else None
         number, url = create_issue(preview_title(label),
-                                   preview_body(urls, caption, next_cron_run(), c["approved"], head=head, story=story),
+                                   preview_body(urls, caption, next_cron_run(kind), c["approved"], head=head, story=story),
                                    ["instagram-vista-previa"])
         state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
         if approval:
@@ -538,7 +543,7 @@ def run():
                 del state["pending"][doc_id]
                 save_state(state, f"Instagram: descartado {doc_id}")
                 continue
-            if now() - datetime.fromisoformat(p["created_at"]) < REVIEW_WAIT:
+            if now() - datetime.fromisoformat(p["created_at"]) < review_wait(p.get("kind", "od")):
                 continue
             if p.get("until") and now().date() > date.fromisoformat(p["until"]):
                 comment(p["issue"], f"No se publica: el plazo que informa la nota terminó el "

@@ -420,6 +420,22 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(self.state["pending"], {})
         self.assertEqual(self.state["published"]["destacado:9"]["status"], "done")
 
+    def test_destacado_espera_2_horas_y_el_resto_12(self):
+        self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
+        self.gh.by_label("instagram-vista-previa")[0]["labels"].append({"name": "publicar"})
+        self.run_pub(hours_later=1)
+        self.assertIn("destacado:9", self.state["pending"])
+        numero = self.gh("POST", "/issues", json={"title": "Orden", "body": "", "labels": []})["number"]
+        self.state["pending"]["orden"] = {"issue": numero, "created_at": pub.iso(T0), "images": [], "caption": "x", "kind": "od"}
+        self.run_pub(hours_later=2)
+        self.assertEqual(self.state["published"]["destacado:9"]["status"], "done")
+        self.assertIn("orden", self.state["pending"])
+
+    def test_aviso_del_issue_usa_la_espera_del_tipo(self):
+        self.clock[0] = T0.replace(hour=8)
+        self.assertEqual(pub.next_cron_run("destacado").day, T0.day)
+        self.assertEqual(pub.next_cron_run("od").day, T0.day + 1)
+
     def state_with_pending(self):
         self.run_pub()
         self.nueva_orden()
