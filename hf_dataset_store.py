@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 
-DATASET_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or "Facucici/actas-sma-data"
+DATASET_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or "Facucici/observatorio-actas-sma"
 INDEX_PATH = "index/index.json"
 PROCESSOR_VERSION = 33 # única versión para app y cron: subirla hace que el cron reprocese lo anterior
 DEBUG = os.getenv("DEBUG", "1").strip().lower() in {"1", "true", "yes", "y"}
