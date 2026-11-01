@@ -9,13 +9,13 @@
 #   python instagram_publisher.py --puesta --publicar sí         # publica esa vista previa, tal cual se revisó
 # Período de prueba, por tipo de post: cada post nuevo abre un Issue; si no tiene la etiqueta "no-publicar", la corrida
 # diaria siguiente lo publica. Después de 3 publicaciones aprobadas así de ese tipo, ese tipo pasa a publicar directo.
-# Excepción: los destacados de la tarifa de agua siempre abren Issue y solo salen si tienen la etiqueta "publicar".
+# Excepción: los destacados (de Prensa, a mano o del Boletín) nunca publican directo: siempre abren Issue y la primera
+# corrida pasadas 2 horas los publica, salvo que tengan "no-publicar" o el Issue esté cerrado.
 # destacados/*.json: destacados escritos a mano, para temas sin nota de Prensa; entran por el mismo circuito.
 # El estado vive en el dataset de HF; el token, solo en el secret IG_ACCESS_TOKEN. Nunca se imprime ni se reporta un token.
 import argparse
 import base64
 import json
-import re
 import sys
 import tempfile
 import time
@@ -39,15 +39,14 @@ STORY_ATTEMPTS = 2                   # la historia: el intento al publicar el ca
 STORY_MAX_AGE = timedelta(hours=24)  # después, "Nuevo post" ya no tiene sentido
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
 REVIEW_WAIT_DESTACADO = timedelta(hours=2)  # revisión mínima: una corrida manual ya puede publicarlo el mismo día
+DESTACADOS = ("destacado", "boletin")
 CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
 APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen las notas de la sesión
 TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado", "boletin": "boletin"}
-KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos",
-              "destacado": "los destacados nuevos", "boletin": "los destacados del Boletín Oficial nuevos"}
+KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos"}
 LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5",
-          "instagram-puesta-al-dia": "4B2E6F", "publicar": "0E8A16"}
+          "instagram-puesta-al-dia": "4B2E6F"}
 MANUAL_DIR = Path(__file__).parent / "destacados"
-TARIFA_AGUA_PAT = re.compile(r"tarif.*\bagua\b|\bagua\b.*tarif", re.IGNORECASE | re.DOTALL)
 PUESTA_DEFAULT_START = date(2026, 6, 1)  # si no se puede saber la fecha del último post
 ERROR_TITLES = {
     "token": "Instagram: problema con el token",
@@ -355,7 +354,7 @@ def destacables(s, today):
 
 
 def review_wait(kind):
-    return REVIEW_WAIT_DESTACADO if kind == "destacado" else REVIEW_WAIT
+    return REVIEW_WAIT_DESTACADO if kind in DESTACADOS else REVIEW_WAIT
 
 
 def next_cron_run(kind):
@@ -368,6 +367,10 @@ def od_label(doc):
     return f"{ic.session_title(doc)} ({ic.date_long(doc.get('date'))})"
 
 
+def cron_when(deadline):
+    return f"{deadline:%d/%m} a las {deadline:%H:%M} UTC ({(deadline - timedelta(hours=3)):%H:%M} en Argentina)"
+
+
 def preview_title(label, prueba=False):
     return f"{'PRUEBA ' if prueba else 'Vista previa '}Instagram: {label}"
 
@@ -376,8 +379,7 @@ def preview_body(urls, caption, deadline=None, approved=None, head=None, story=N
     if head is None and deadline is None:
         head = ["**PRUEBA: esta vista previa no se publica.**"]
     elif head is None:
-        when = f"{deadline:%d/%m} a las {deadline:%H:%M} UTC ({(deadline - timedelta(hours=3)):%H:%M} en Argentina)"
-        head = [f"Se publica en Instagram en la próxima corrida del cron: **{when}** (puede demorar unos minutos).", "",
+        head = [f"Se publica en Instagram en la próxima corrida del cron: **{cron_when(deadline)}** (puede demorar unos minutos).", "",
                 "**Si no querés que se publique, poné la etiqueta `no-publicar`** (o cerrá este Issue) antes de esa hora."]
     body = head + ["", "### Placas", ""] + [f"![Placa {i}]({u})" for i, u in enumerate(urls, 1)]
     body += ["", "### Texto del post", "", "```text", caption.strip(), "```"]
@@ -402,20 +404,19 @@ def counters(state, kind):
 
 
 def enqueue(state, key, kind, label, urls, caption, until=None, story=None):
-    """Vista previa por Issue mientras el tipo está en período de prueba; después, publica directo.
+    """Vista previa por Issue mientras el tipo está en período de prueba (los destacados, siempre); si no, publica directo.
     until: fecha ISO en que vence lo que informa la nota; si pasa antes de publicar, no se publica.
     story: URL de la historia que se publica después del carrusel."""
     c = counters(state, kind)
-    approval = kind in ("destacado", "boletin") and bool(TARIFA_AGUA_PAT.search(caption))
-    if c["mode"] == "review" or approval:
-        head = ["**No se publica solo.** Para publicarlo, poné la etiqueta `publicar`: sale en la próxima corrida del cron. "
-                "Para descartarlo, poné `no-publicar` o cerrá este Issue."] if approval else None
+    destacado = kind in DESTACADOS
+    if c["mode"] == "review" or destacado:
+        deadline = next_cron_run(kind)
+        head = [f"**Se publica solo** en la primera corrida pasadas 2 horas (la del cron: {cron_when(deadline)}). "
+                "Para descartarlo, poné la etiqueta `no-publicar` o cerrá este Issue antes."] if destacado else None
         number, url = create_issue(preview_title(label),
-                                   preview_body(urls, caption, next_cron_run(kind), c["approved"], head=head, story=story),
+                                   preview_body(urls, caption, deadline, None if destacado else c["approved"], head=head, story=story),
                                    ["instagram-vista-previa"])
         state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
-        if approval:
-            state["pending"][key]["needs_approval"] = True
         if until:
             state["pending"][key]["until"] = until
         if story:
@@ -552,8 +553,6 @@ def run():
                 del state["pending"][doc_id]
                 save_state(state, f"Instagram: vencido {doc_id}")
                 continue
-            if p.get("needs_approval") and "publicar" not in {lb["name"] for lb in issue["labels"]}:
-                continue
             permalink = publish_doc(state, doc_id, p["images"], p["caption"], p.get("story"))
             comment(p["issue"], f"Publicado en Instagram: {permalink}")
             close_issue(p["issue"])
@@ -561,7 +560,7 @@ def run():
             kind = p.get("kind", "od")
             c = counters(state, kind)
             c["approved"] += 1
-            if c["mode"] == "review" and c["approved"] >= REVIEW_APPROVALS:
+            if kind in KIND_NAMES and c["mode"] == "review" and c["approved"] >= REVIEW_APPROVALS:
                 c["mode"] = "direct"
                 comment(p["issue"], f"Con {REVIEW_APPROVALS} publicaciones aprobadas, termina el período de prueba: "
                                     f"desde ahora {KIND_NAMES[kind]} se publican directo.")

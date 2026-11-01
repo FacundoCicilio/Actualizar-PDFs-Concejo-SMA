@@ -668,7 +668,7 @@ def numbers(text):
 def only_note_numbers(out, note):
     """El texto generado no puede traer cifras (montos, porcentajes, fechas) que no estén en la nota."""
     # shortcut: compara cifras sueltas, no su sentido ("50%" pasa si la nota cita el "Artículo 50"); la revisión
-    # por Issue del período de prueba es el control de fondo. Mejorar si aparece un caso real.
+    # por Issue es el control de fondo. Mejorar si aparece un caso real.
     return numbers(out) <= numbers(note)
 
 

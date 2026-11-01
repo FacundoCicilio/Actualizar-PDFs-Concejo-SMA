@@ -375,7 +375,7 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(self.ig.published(), [])
         self.assertIn("https://www.instagram.com/p/YA/", self.gh.issues[1]["comments"][-1])
 
-    def test_destacado_manual_entra_una_sola_vez_y_espera_la_etiqueta(self):
+    def test_destacado_manual_entra_una_sola_vez_y_sale_a_las_2_horas(self):
         real = mock.patch.object(pub, "MANUAL_DIR", ic.Path(pub.__file__).parent / "destacados")
         real.start()
         self.addCleanup(real.stop)
@@ -384,11 +384,12 @@ class PublisherTest(unittest.TestCase):
         self.run_pub(2)
         [issue] = self.gh.by_label("instagram-vista-previa")
         self.assertIn("agua y cloacas", issue["title"])
-        self.assertIn("`publicar`", issue["body"])
+        self.assertIn("`no-publicar`", issue["body"])
+        self.assertNotIn("Período de prueba", issue["body"])
         self.assertIn("Fuente: La Montaña (29/10/2026), con base en el Dictamen 1445/2026", issue["body"])
-        self.run_pub(26)
         self.assertEqual(self.ig.published(), [])
-        issue["labels"].append({"name": "publicar"})
+        self.run_pub(3)
+        self.assertEqual(len(self.ig.published()), 1)
         self.run_pub(50)
         self.assertEqual(len(self.ig.published()), 1)
         self.assertEqual(len(self.gh.by_label("instagram-vista-previa")), 1)
@@ -401,28 +402,39 @@ class PublisherTest(unittest.TestCase):
                     "📌 Destacado: actualización de la tarifa de agua y cloacas")
         return state
 
-    def test_tarifa_de_agua_abre_issue_aunque_el_tipo_publique_directo(self):
+    def test_destacados_abren_issue_aunque_el_estado_diga_directo(self):
+        for kind in pub.DESTACADOS:
+            state = self.enqueue_tarifa(kind)
+            self.assertEqual(state["pending"]["destacado:9"]["kind"], kind)
+            self.assertNotIn("needs_approval", state["pending"]["destacado:9"])
+            self.assertEqual(state["published"], {})
+
+    def test_vista_previa_vieja_con_needs_approval_sale_sin_etiqueta(self):
         state = self.enqueue_tarifa()
-        self.assertTrue(state["pending"]["destacado:9"]["needs_approval"])
-        self.assertEqual(state["published"], {})
-        self.assertIn("`publicar`", self.gh.by_label("instagram-vista-previa")[0]["body"])
+        state["pending"]["destacado:9"]["needs_approval"] = True  # como el issue #24, creado antes del cambio de política
+        self.hf[pub.STATE_PATH] = state
+        self.run_pub(hours_later=2)
+        self.assertEqual(self.state["published"]["destacado:9"]["status"], "done")
 
-    def test_tarifa_de_agua_no_sale_sin_la_etiqueta(self):
-        self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
-        self.run_pub(hours_later=24)
+    def test_destacado_se_descarta_dentro_de_la_ventana(self):
+        for descartar in (lambda i: i["labels"].append({"name": "no-publicar"}), lambda i: i.update(state="closed")):
+            self.gh.issues.clear()
+            self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
+            descartar(self.gh.by_label("instagram-vista-previa")[0])
+            self.run_pub(hours_later=1)
+            self.assertEqual(self.state["pending"], {})
+            self.assertEqual(self.state["published"], {})
+            self.assertEqual(self.ig.published(), [])
+
+    def test_boletin_tambien_sale_a_las_2_horas(self):
+        self.hf[pub.STATE_PATH] = self.enqueue_tarifa("boletin")
+        self.run_pub(hours_later=1)
         self.assertIn("destacado:9", self.state["pending"])
-        self.assertEqual(self.state["published"], {})
-
-    def test_tarifa_de_agua_sale_con_la_etiqueta(self):
-        self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
-        self.gh.by_label("instagram-vista-previa")[0]["labels"].append({"name": "publicar"})
-        self.run_pub(hours_later=24)
-        self.assertEqual(self.state["pending"], {})
+        self.run_pub(hours_later=2)
         self.assertEqual(self.state["published"]["destacado:9"]["status"], "done")
 
     def test_destacado_espera_2_horas_y_el_resto_12(self):
         self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
-        self.gh.by_label("instagram-vista-previa")[0]["labels"].append({"name": "publicar"})
         self.run_pub(hours_later=1)
         self.assertIn("destacado:9", self.state["pending"])
         numero = self.gh("POST", "/issues", json={"title": "Orden", "body": "", "labels": []})["number"]
@@ -434,6 +446,7 @@ class PublisherTest(unittest.TestCase):
     def test_aviso_del_issue_usa_la_espera_del_tipo(self):
         self.clock[0] = T0.replace(hour=8)
         self.assertEqual(pub.next_cron_run("destacado").day, T0.day)
+        self.assertEqual(pub.next_cron_run("boletin").day, T0.day)
         self.assertEqual(pub.next_cron_run("od").day, T0.day + 1)
 
     def state_with_pending(self):
@@ -507,7 +520,8 @@ class PublisherTest(unittest.TestCase):
             self.nueva_nota(20 + i, 30 + i, 19, f"{TASA} número {i}")
             self.run_pub(24 * (i + 1) + 1)
         self.run_pub(24 * 5)
-        self.assertEqual(pub.counters(self.state, "destacado"), {"approved": 3, "mode": "direct"})
+        self.assertEqual(pub.counters(self.state, "destacado"), {"approved": 3, "mode": "review"})  # nunca pasan a directo
+        self.assertNotIn("termina el período de prueba", self.gh.all_text())
         self.assertEqual((self.state["approved"], self.state["mode"]), (0, "review"))  # el de órdenes del día no cambia
         self.nueva_orden()
         self.run_pub(24 * 6)
@@ -614,7 +628,7 @@ class PublisherTest(unittest.TestCase):
         self.assertRegex(caption, r"\n• Tierras: \d+ decisiones\n")  # la placa agrupada, en una sola línea
         self.assertIn("ord-15750", self.state["puesta"]["notes"])  # al publicarla, quedan vistas
 
-    def test_boletin_destacado_con_periodo_de_prueba(self):
+    def test_boletin_destacado_con_vista_previa(self):
         import test_boletin
         self.run_pub()
         self.notes, self.boletin = test_boletin.PERIODO, test_boletin.store()
@@ -632,7 +646,7 @@ class PublisherTest(unittest.TestCase):
         self.assertFalse(any(k.startswith("destacado:ord-1575") for k in pending))  # adjudicaciones: nunca sueltas
         body = next(i["body"] for i in self.gh.by_label("instagram-vista-previa") if "15.740/26" in i["body"])
         self.assertIn("Boletín Oficial N° 826", body)
-        self.assertIn(f"0 de {pub.REVIEW_APPROVALS}", body)
+        self.assertNotIn("Período de prueba", body)
 
     def test_boletin_no_publica_si_nombra_a_un_particular(self):
         import test_boletin
