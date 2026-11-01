@@ -17,6 +17,32 @@ def _items_by_key(r):
     return {it["key"]: it for it in r["items"]}
 
 
+class VariantesDePdfTest(unittest.TestCase):
+    def test_tema_sin_guiones_y_encabezado_sin_espacio(self):
+        # S.O. 25/2026: el cuadro tarifario de agua se perdía.
+        items = _parse("orden-del-dia-25-2026.pdf", "PDF-Orden-del-Dia-de-la-SO-N_C2_B0-25-2026.pdf")["items"]
+        textos = " ".join(i["title"] for i in items)
+        self.assertIn("cuadro tarifario de Agua Potable y Saneamiento", textos)
+        self.assertIn("Subsidios para personas en situación de vulnerabilidad", textos)  # 1733-1732/2026
+
+    def test_concejo_deliberante_en_el_tema_no_es_membrete(self):
+        from actas_parser import remove_boilerplate_global, remove_boilerplate_lines
+        linea = "242/2026 --- Tema: Dictamen s/ cronograma de sesiones del Concejo Deliberante"
+        self.assertEqual(remove_boilerplate_global(remove_boilerplate_lines(f"CONCEJO DELIBERANTE\n{linea}")), linea)
+
+    def test_temas_numerados(self):
+        # S.O. 24/2026: "1703/2026 --- Tema 1:" bajo un encabezado sin espacio.
+        from actas_parser import extract_items
+        text = "3.05001-279/2023 21/10/2026 Miembro Informante: concejal Vita\n1703/2026 --- Tema 1: Dictamen s/ Modificación de la Resolución CD 43/26"
+        self.assertEqual([i["key"] for i in extract_items(text)], ["05001-279/2023"])
+
+    def test_pdf_con_paginas_repetidas(self):
+        # S.O. 7/2026: 4 páginas repetidas 5 veces; daba 0 ítems.
+        r = _parse("orden-del-dia-07-2026.pdf", "Orden-del-Dia-de-la-S.O.-N_C2_B0-07-2026-PDF.pdf")
+        self.assertEqual(len(r["items"]), len({i["key"] for i in r["items"]}))
+        self.assertIn("Acepta donaciones de objetos al Patrimonio", " ".join(i["title"] for i in r["items"]))
+
+
 class OrdenesDelDiaRealesTest(unittest.TestCase):
     """PDFs reales del Concejo: si un cambio de regex rompe la detección, falla acá y no en el sitio."""
 
@@ -84,12 +110,12 @@ class OrdenesDelDiaRealesTest(unittest.TestCase):
     def test_textos_esperados(self):
         so01, so23 = _items_by_key(self.so01), _items_by_key(self.so23)
         self.assertTrue(so01["95/2026"]["que_dice"].startswith("Dictamen: Decreto N° 200/26"))
-        self.assertTrue(so23["1621/2026"]["que_dice"].startswith("Declaración de Interés Municipal por los 20 años"))
+        self.assertTrue(so23["05001-544/2006"]["que_dice"].startswith("Declaración de Interés Municipal por los 20 años"))
 
     def test_declaraciones_de_interes_son_cultura(self):
         items = _items_by_key(self.so23)
         self.assertEqual(items["1521/2026"]["impact_tags"], CULTURA)  # Seminario "No Arancelado"
-        self.assertEqual(items["1621/2026"]["impact_tags"], CULTURA)  # "Puentes de Luz": no es obra ni servicio
+        self.assertEqual(items["05001-544/2006"]["impact_tags"], CULTURA)  # "Puentes de Luz": no es obra ni servicio
 
 
 class InferImpactTest(unittest.TestCase):

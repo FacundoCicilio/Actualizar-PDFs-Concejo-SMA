@@ -124,10 +124,10 @@ class PublisherTest(unittest.TestCase):
         self.notes = {"1": nota(1, 23, 8, INTERES)}  # sesión anterior a la primera corrida
         self.boletin = {"boletines": {}, "ordenanzas": {}}
         self.gh, self.ig, self.clock = FakeGitHub(), FakeIG(), [T0]
-        self.refreshes = []
         tmp = tempfile.mkdtemp()
         patches = [
             mock.patch.object(ic, "DOTENV", ic.Path(tmp) / "no-existe.env"),  # nunca el .env real
+            mock.patch.object(pub, "MANUAL_DIR", ic.Path(tmp) / "sin-destacados"),
             mock.patch.dict(os.environ, {"IG_ACCESS_TOKEN": TOKEN, "IG_USER_ID": "17841", "GITHUB_TOKEN": "gh"}, clear=True),
             mock.patch.object(pub, "load_index", lambda repo: self.index),
             mock.patch.object(pub, "load_json", lambda repo, path: self.hf.get(path)),
@@ -136,7 +136,6 @@ class PublisherTest(unittest.TestCase):
             mock.patch.object(pub, "gh", self.gh),
             mock.patch.object(pub, "ig", self.ig),
             mock.patch.object(pub, "upload_images", lambda paths, folder: [f"https://raw/{folder}/{p.name}" for p in paths]),
-            mock.patch.object(pub, "refresh", self._refresh),
             mock.patch.object(pub, "now", lambda: self.clock[0]),
             mock.patch.object(pub.time, "sleep", lambda s: None),
             mock.patch.object(ic, "criollo_lines", lambda items: ([None] * len(items), None)),
@@ -151,11 +150,6 @@ class PublisherTest(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        self.hf[pub.TOKEN_PATH] = {"token": TOKEN, "expires_at": pub.iso(T0 + timedelta(days=50))}
-
-    def _refresh(self, token):
-        self.refreshes.append(token)
-        return token, self.clock[0] + timedelta(days=60)
 
     def run_pub(self, hours_later=0):
         self.clock[0] = T0 + timedelta(hours=hours_later)
@@ -380,6 +374,51 @@ class PublisherTest(unittest.TestCase):
         self.run_pub(24)
         self.assertEqual(self.ig.published(), [])
         self.assertIn("https://www.instagram.com/p/YA/", self.gh.issues[1]["comments"][-1])
+
+    def test_destacado_manual_entra_una_sola_vez_y_espera_la_etiqueta(self):
+        real = mock.patch.object(pub, "MANUAL_DIR", ic.Path(pub.__file__).parent / "destacados")
+        real.start()
+        self.addCleanup(real.stop)
+        self.run_pub()
+        self.run_pub(1)
+        self.run_pub(2)
+        [issue] = self.gh.by_label("instagram-vista-previa")
+        self.assertIn("agua y cloacas", issue["title"])
+        self.assertIn("`publicar`", issue["body"])
+        self.assertIn("Fuente: Orden del Día N° 25 y La Montaña", issue["body"])
+        self.run_pub(26)
+        self.assertEqual(self.ig.published(), [])
+        issue["labels"].append({"name": "publicar"})
+        self.run_pub(50)
+        self.assertEqual(len(self.ig.published()), 1)
+        self.assertEqual(len(self.gh.by_label("instagram-vista-previa")), 1)
+
+    def enqueue_tarifa(self, kind="destacado"):
+        self.hf[pub.STATE_PATH] = {"seen": ["viejo1", "viejo2"], "sessions": [], "pending": {}, "published": {}, "approved": 0,
+                                   "mode": "review", "review": {kind: {"approved": 3, "mode": "direct"}}}
+        state = self.state
+        pub.enqueue(state, "destacado:9", kind, "Tarifa", ["https://raw/1.jpg", "https://raw/2.jpg"],
+                    "📌 Destacado: actualización de la tarifa de agua y cloacas")
+        return state
+
+    def test_tarifa_de_agua_abre_issue_aunque_el_tipo_publique_directo(self):
+        state = self.enqueue_tarifa()
+        self.assertTrue(state["pending"]["destacado:9"]["needs_approval"])
+        self.assertEqual(state["published"], {})
+        self.assertIn("`publicar`", self.gh.by_label("instagram-vista-previa")[0]["body"])
+
+    def test_tarifa_de_agua_no_sale_sin_la_etiqueta(self):
+        self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
+        self.run_pub(hours_later=24)
+        self.assertIn("destacado:9", self.state["pending"])
+        self.assertEqual(self.state["published"], {})
+
+    def test_tarifa_de_agua_sale_con_la_etiqueta(self):
+        self.hf[pub.STATE_PATH] = self.enqueue_tarifa()
+        self.gh.by_label("instagram-vista-previa")[0]["labels"].append({"name": "publicar"})
+        self.run_pub(hours_later=24)
+        self.assertEqual(self.state["pending"], {})
+        self.assertEqual(self.state["published"]["destacado:9"]["status"], "done")
 
     def state_with_pending(self):
         self.run_pub()
@@ -665,23 +704,20 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(self.ig.published(), [])
 
     # --- token
-    def test_token_se_renueva_cuando_faltan_menos_de_15_dias(self):
-        self.hf[pub.TOKEN_PATH]["expires_at"] = pub.iso(T0 + timedelta(days=10))
+    def test_token_sale_del_secret_y_no_toca_el_dataset(self):
+        self.hf["instagram/token.json"] = {"token": "viejo-del-dataset"}
+        self.assertEqual(pub.get_token(), TOKEN)
+        self.assertEqual(self.hf["instagram/token.json"], {"token": "viejo-del-dataset"})
+        del self.hf["instagram/token.json"]
         self.run_pub()
         self.run_pub(24)
-        self.assertEqual(self.refreshes, [TOKEN])
-        self.assertEqual(self.hf[pub.TOKEN_PATH]["expires_at"], pub.iso(T0 + timedelta(hours=24, days=60)))
+        self.assertNotIn("instagram/token.json", self.hf)
 
-    def test_token_lejos_del_vencimiento_no_se_renueva(self):
-        self.run_pub()
-        self.run_pub(24)
-        self.assertEqual(self.refreshes, [])
-
-    def test_si_el_guardado_vencio_toma_el_secret_nuevo(self):
-        self.hf[pub.TOKEN_PATH] = {"token": "viejo-vencido", "expires_at": pub.iso(T0)}
-        self.run_pub()
-        self.run_pub(24)
-        self.assertEqual(self.hf[pub.TOKEN_PATH]["token"], TOKEN)
+    def test_sin_secret_no_usa_el_token_del_dataset(self):
+        self.hf["instagram/token.json"] = {"token": TOKEN}
+        del os.environ["IG_ACCESS_TOKEN"]
+        with self.assertRaises(pub.PublishError):
+            pub.get_token()
 
     def test_sin_ningun_token_valido_abre_issue(self):
         self.ig.valid_tokens = set()

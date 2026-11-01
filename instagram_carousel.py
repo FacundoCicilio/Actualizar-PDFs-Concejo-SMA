@@ -797,7 +797,8 @@ def destacado_slide(sdoc, fields, ordenanza=None):
         blocks += [text_block(question, (36,), DESTACADO[0], 10, bold=True),
                    text_block(answer, (size,), INK if informed else MUTED, 56, ANSWER_MAX_H, bold=informed)]
     header = f"Ordenanza {ordenanza['label']}" if ordenanza else session_title(sdoc)
-    return content_slide("DESTACADO", header, blocks, source_ref(ordenanza), "2/2", DESTACADO[0])
+    ref = f"Fuente: {fields['fuente']}" if fields.get("fuente") else source_ref(ordenanza)
+    return content_slide("DESTACADO", header, blocks, ref, "2/2", DESTACADO[0])
 
 
 def destacado_caption(sdoc, fields, ordenanza=None):
@@ -806,7 +807,8 @@ def destacado_caption(sdoc, fields, ordenanza=None):
     approved = f"Aprobado por el Concejo Deliberante en la {session_title(sdoc)} ({date_long(sdoc.get('date'))})"
     if ordenanza:
         approved += f": Ordenanza {ordenanza['label']}, publicada en el Boletín Oficial N° {ordenanza['boletin']}"
-    lines += ["", approved + ".", FUENTE_BO if ordenanza else FUENTE, "Más info: link en la bio.", "", HASHTAGS]
+    source = f"Fuente: {fields['fuente']}" if fields.get("fuente") else FUENTE_BO if ordenanza else FUENTE
+    lines += ["", approved + ".", source, "Más info: link en la bio.", "", HASHTAGS]
     return "\n".join(lines)
 
 

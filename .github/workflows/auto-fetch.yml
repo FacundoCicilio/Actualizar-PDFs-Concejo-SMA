@@ -33,6 +33,18 @@ jobs:
           SOURCE_URL: "https://prensacd.cdsma.gob.ar/ordenes-del-dia-2026/"
         run: |
           python auto_fetch.py
+      # Sin SOURCE_URL: mira la página del año en curso aunque auto_fetch siga apuntando a otra.
+      - name: Control de salud
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          IG_TOKEN_EXPIRES: ${{ secrets.IG_TOKEN_EXPIRES }}
+          ALERT_SMTP_USER: ${{ secrets.ALERT_SMTP_USER }}
+          ALERT_SMTP_PASSWORD: ${{ secrets.ALERT_SMTP_PASSWORD }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+        run: |
+          python health_check.py
       # Corre aunque auto_fetch falle (puede haber vistas previas pendientes), pero no si fallaron los tests.
       - name: Instagram
         if: ${{ !cancelled() && steps.tests.outcome == 'success' }}

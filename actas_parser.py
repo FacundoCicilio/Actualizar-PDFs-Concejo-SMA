@@ -57,8 +57,9 @@ BOILERPLATE_PATTERNS = [
     r"Inf[oó]rmese,?\s*sea\s+donante",
     r"\bsea\s+donante\b",
     r"(?:https?:\/\/)?(?:www\.)?incucai\.gov\.ar",
-    r"CONCEJO\s+DELIBERANTE\s+SAN\s+MARTIN\s+DE\s+LOS\s+ANDES",
-    r"CONCEJO\s+DELIBERANTE",
+    # Solo el membrete en mayúsculas: "cronograma de sesiones del Concejo Deliberante" es el tema de un ítem (S.O. 3/2026).
+    r"(?-i:CONCEJO\s+DELIBERANTE\s+SAN\s+MARTIN\s+DE\s+LOS\s+ANDES)",
+    r"(?-i:CONCEJO\s+DELIBERANTE)",
     r"P[áa]gina\s+\d+\s+de\s+\d+",
     r"\bP[áa]g\.\s*\d+\b",
     r"^P[áa]gina\s*\d+$",  # pie "Página2": si queda, corta el ítem que sigue en la página siguiente
@@ -118,7 +119,7 @@ SECTION_PAT = re.compile(
     r"|ANEXOS?\s+[\d\s,y–-]+)$"
 )
 
-BASURA_PATTERNS = [HEADER_PAT, MIEMBRO_PAT]
+BASURA_PATTERNS = [HEADER_PAT, MIEMBRO_PAT, re.compile(r"^\d{2}/\d{2}/\d{4}\s+Miembro\s+Informante:", re.IGNORECASE)]
 
 def is_basura(s):
     s = (s or "").strip()
@@ -146,20 +147,26 @@ def clean_que_dice(s):
 
 # Patrón SMA: "1. expediente   fecha   Miembro Informante: Concejal X"
 MI_PAT = re.compile(
-    r"^(\d{1,2})\.\s+((?:\d{5,6}[-/]\d{1,6}/\d{4}|EE-\d{4}-\d+\S*))\s+\d{2}/\d{2}/\d{4}\s+Miembro\s+Informante:",
+    r"^(\d{1,2})\.\s*((?:\d{5,6}[-/]\d{1,6}\s*/\s*\d{4}|EE-\d{4}-\d+\S*))\s+\d{2}/\d{2}/\d{2,4}\s+Miembro\s+Informante:",
     re.IGNORECASE
 )
-TEMA_LINE_PAT = re.compile(r"^\d+/\d{4}\s*---\s*Tema:\s*(.+)$", re.IGNORECASE)
+# Variantes reales: "1445/2026 Tema:" (sin guiones), "1733-1732/2026 --- Tema:" (dos proyectos), "1703/2026 --- Tema 1:".
+TEMA_LINE_PAT = re.compile(r"^\d{1,6}(?:-\d{1,6})?/\d{4}\s*[—–-]*\s*Tema(?:\s*\d+)?:\s*(.*)$", re.IGNORECASE)
 
 
 def extract_text_from_pdf_bytes(pdf_bytes, max_pages=80):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = []
     n_pages = min(len(doc), max_pages)
+    seen_pages = set()
     for i in range(n_pages):
         page = doc.load_page(i)
         words = page.get_text("words") or []
         if not words: continue
+        # La S.O. 7/2026 es un PDF de 4 páginas repetido 5 veces: sin esto, cada línea parece un encabezado y se borra todo.
+        page_text = " ".join(w[4] for w in words)
+        if page_text in seen_pages: continue
+        seen_pages.add(page_text)
         words.sort(key=lambda w: (round(w[1], 1), round(w[0], 1)))
         line_bins = {}
         for w in words:
@@ -512,7 +519,7 @@ def extract_items(text):
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     items = []
 
-    exp_tema_pat = re.compile(r"^(\d{1,6}(?:[-]\d{1,6})?/\d{4})\s*[—–-]\s*Tema:\s*(.*)$", re.IGNORECASE)
+    exp_tema_pat = re.compile(r"^(\d{1,6}(?:[-]\d{1,6})?/\d{4})\s*[—–-]*\s*Tema(?:\s*\d+)?:\s*(.*)$", re.IGNORECASE)
     exp_pat = re.compile(r"^(\d{1,6}(?:[-]\d{1,6})?/\d{4})\s*[—–-]\s*(.*)$", re.IGNORECASE)
     num_pat = re.compile(r"^(\d{1,2})[\.\)]\s+(.*)$")
 
@@ -535,7 +542,7 @@ def extract_items(text):
         # Patrón SMA con Miembro Informante
         mi_match = MI_PAT.match(lines[i])
         if mi_match:
-            exp_ref = mi_match.group(2).strip()
+            exp_ref = re.sub(r"\s+", "", mi_match.group(2))
             tema_text = ""
             j = i + 1
             while j < len(lines) and j < i + 5:
@@ -560,7 +567,7 @@ def extract_items(text):
                         items.append({"key": exp_ref, "title": full[:2000], "que_dice": qd,
                                       "impact_text": impact["impact_text"], "impact_tags": impact["impact_tags"],
                                       "decreto": None, "expediente": exp_ref, "topics": classify_topics(full)})
-            i = j
+            i = j if tema_text else i + 1  # sin tema reconocido no se saltea nada: lo que sigue puede ser un ítem
             continue
 
         hit = is_new_item(lines[i])

@@ -9,9 +9,13 @@
 #   python instagram_publisher.py --puesta --publicar sí         # publica esa vista previa, tal cual se revisó
 # Período de prueba, por tipo de post: cada post nuevo abre un Issue; si no tiene la etiqueta "no-publicar", la corrida
 # diaria siguiente lo publica. Después de 3 publicaciones aprobadas así de ese tipo, ese tipo pasa a publicar directo.
-# Estado y token viven en el dataset privado de HF. Nunca se imprime ni se reporta un token.
+# Excepción: los destacados de la tarifa de agua siempre abren Issue y solo salen si tienen la etiqueta "publicar".
+# destacados/*.json: destacados escritos a mano, para temas sin nota de Prensa; entran por el mismo circuito.
+# El estado vive en el dataset de HF; el token, solo en el secret IG_ACCESS_TOKEN. Nunca se imprime ni se reporta un token.
 import argparse
 import base64
+import json
+import re
 import sys
 import tempfile
 import time
@@ -27,7 +31,6 @@ import prensa
 from hf_dataset_store import DATASET_REPO_ID, load_index, load_json, load_processed_json, save_json
 
 STATE_PATH = "instagram/state.json"
-TOKEN_PATH = "instagram/token.json"  # aparte del estado: el estado puede terminar citado en un Issue, el token nunca
 MEDIA_BRANCH = "instagram-media"     # imágenes públicas para Instagram; un push acá no dispara el deploy del Space
 GRAPH = "https://graph.instagram.com/v25.0"
 IG_USERNAME = "actas.sma"  # cuenta en la que se publica: la prueba verifica que el token sea de esta cuenta
@@ -35,14 +38,15 @@ REVIEW_APPROVALS = 3
 STORY_ATTEMPTS = 2                   # la historia: el intento al publicar el carrusel y un solo reintento
 STORY_MAX_AGE = timedelta(hours=24)  # después, "Nuevo post" ya no tiene sentido
 REVIEW_WAIT = timedelta(hours=12)    # "la próxima corrida diaria": re-ejecutar el mismo día no publica
-REFRESH_BEFORE = timedelta(days=15)  # el token dura 60 días; con el cron diario hay ~15 intentos de renovación
 CRON_TIME_UTC = (10, 17)             # hora y minuto: igual que el schedule de auto-fetch.yml
 APROBADO_WAIT = timedelta(days=7)    # "Qué se aprobó" espera a que lleguen las notas de la sesión
 TIPOS = {"orden-del-dia": "od", "que-se-aprobo": "aprobado", "destacado": "destacado", "boletin": "boletin"}
 KIND_NAMES = {"od": "las órdenes del día nuevas", "aprobado": "los resúmenes 'Qué se aprobó' nuevos",
               "destacado": "los destacados nuevos", "boletin": "los destacados del Boletín Oficial nuevos"}
 LABELS = {"instagram-vista-previa": "1F4E79", "no-publicar": "B60205", "instagram-error": "D93F0B", "instagram-prueba": "C5DEF5",
-          "instagram-puesta-al-dia": "4B2E6F"}
+          "instagram-puesta-al-dia": "4B2E6F", "publicar": "0E8A16"}
+MANUAL_DIR = Path(__file__).parent / "destacados"
+TARIFA_AGUA_PAT = re.compile(r"tarif.*\bagua\b|\bagua\b.*tarif", re.IGNORECASE | re.DOTALL)
 PUESTA_DEFAULT_START = date(2026, 6, 1)  # si no se puede saber la fecha del último post
 ERROR_TITLES = {
     "token": "Instagram: problema con el token",
@@ -245,50 +249,16 @@ def token_works(token):
         raise
 
 
-def refresh(token):
-    """Renueva por 60 días. El token tiene que tener más de 24 h y no estar vencido."""
-    try:
-        r = requests.get("https://graph.instagram.com/refresh_access_token", timeout=30,
-                         params={"grant_type": "ig_refresh_token", "access_token": token})
-    except requests.RequestException as e:
-        raise PublishError(f"Instagram no respondió al renovar el token ({type(e).__name__}).") from None
-    body = r.json() if r.content else {}
-    if r.status_code >= 400 or "access_token" not in body:
-        raise PublishError(f"No se pudo renovar el token: {(body.get('error') or {}).get('message') or f'HTTP {r.status_code}'}")
-    return body["access_token"], now() + timedelta(seconds=int(body["expires_in"]))
-
-
-def has_token():
-    return bool(ic.env_value("IG_ACCESS_TOKEN") or (load_json(DATASET_REPO_ID, TOKEN_PATH) or {}).get("token"))
-
-
 def get_token():
-    """Token que funciona, renovado si vence en menos de 15 días. Primero el guardado en el dataset (puede ser más
-    nuevo que el secret); si no anda, el secret IG_ACCESS_TOKEN (por si cargaste uno nuevo)."""
+    """Token del secret IG_ACCESS_TOKEN. Dura 60 días y no se renueva solo: hay que generar otro y actualizar el secret."""
     global _token
-    if _token:
-        return _token
-    stored = load_json(DATASET_REPO_ID, TOKEN_PATH) or {}
-    for token in dict.fromkeys(t for t in (stored.get("token"), ic.env_value("IG_ACCESS_TOKEN")) if t):
-        if not token_works(token):
-            continue
-        is_stored = token == stored.get("token")
-        expires = datetime.fromisoformat(stored["expires_at"]) if is_stored and stored.get("expires_at") else None
-        if expires is None or expires - now() < REFRESH_BEFORE:
-            try:
-                token, expires = refresh(token)
-            except PublishError as e:
-                if expires is not None:  # se acerca el vencimiento y no se renueva: avisar, pero el token todavía sirve
-                    report_error("token", f"{e} Vence el {expires:%d/%m/%Y}.")
-                else:                    # token recién cargado (menos de 24 h): se renueva más adelante
-                    expires = now() + timedelta(days=55)
-        if not is_stored or token != stored.get("token") or iso(expires) != stored.get("expires_at"):
-            save_json(DATASET_REPO_ID, TOKEN_PATH, {"token": token, "expires_at": iso(expires), "saved_at": iso(now())},
-                      "Instagram: token")
+    if not _token:
+        token = ic.env_value("IG_ACCESS_TOKEN")
+        if not token or not token_works(token):
+            raise PublishError("El token de Instagram no funciona (falta, venció o fue revocado). Generá uno nuevo de larga "
+                               "duración y cargalo en el secret IG_ACCESS_TOKEN de GitHub; el cron lo toma en la próxima corrida.")
         _token = token
-        return token
-    raise PublishError("Ningún token de Instagram funciona (falta, venció o fue revocado). Generá uno nuevo de larga "
-                       "duración y cargalo en el secret IG_ACCESS_TOKEN de GitHub; el cron lo toma en la próxima corrida.")
+    return _token
 
 
 def user_id(token):
@@ -363,6 +333,21 @@ def prepare_destacado(s, note, folder):
     return f"Destacado · {fields['titular']}", urls, caption, end and end.isoformat(), story
 
 
+def prepare_manual(m, folder):
+    """Destacado escrito a mano: {session, fields, tags}. Devuelve lo mismo que prepare_destacado."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = ic.render_destacado(m["session"], m["fields"], m["tags"], tmp, ext="jpg")
+        caption = (Path(tmp) / "caption.txt").read_text(encoding="utf-8")
+        urls, story = upload_with_story(paths, tmp, folder, caption)
+    return f"Destacado · {m['fields']['titular']}", urls, caption, None, story
+
+
+def run_manual(state):
+    return run_jobs(state, [(f"destacado:{p.stem}", "destacado",
+                             lambda folder, m=json.loads(p.read_text(encoding="utf-8")): prepare_manual(m, folder))
+                            for p in sorted(MANUAL_DIR.glob("*.json"))])
+
+
 def destacables(s, today):
     """Notas de la sesión que van como destacado: no las que informan un plazo que ya terminó."""
     return [n for n in s["notes"] if prensa.is_destacado(n) and not prensa.vencida(n, today)]
@@ -416,11 +401,16 @@ def enqueue(state, key, kind, label, urls, caption, until=None, story=None):
     until: fecha ISO en que vence lo que informa la nota; si pasa antes de publicar, no se publica.
     story: URL de la historia que se publica después del carrusel."""
     c = counters(state, kind)
-    if c["mode"] == "review":
+    approval = kind in ("destacado", "boletin") and bool(TARIFA_AGUA_PAT.search(caption))
+    if c["mode"] == "review" or approval:
+        head = ["**No se publica solo.** Para publicarlo, poné la etiqueta `publicar`: sale en la próxima corrida del cron. "
+                "Para descartarlo, poné `no-publicar` o cerrá este Issue."] if approval else None
         number, url = create_issue(preview_title(label),
-                                   preview_body(urls, caption, next_cron_run(), c["approved"], story=story),
+                                   preview_body(urls, caption, next_cron_run(), c["approved"], head=head, story=story),
                                    ["instagram-vista-previa"])
         state["pending"][key] = {"issue": number, "created_at": iso(now()), "images": urls, "caption": caption, "kind": kind}
+        if approval:
+            state["pending"][key]["needs_approval"] = True
         if until:
             state["pending"][key]["until"] = until
         if story:
@@ -516,7 +506,7 @@ def run():
         return 0
     errors = 0
     ensure_setup()
-    if has_token():  # mantenimiento diario: renueva antes de que venza aunque no haya nada para publicar
+    if ic.env_value("IG_ACCESS_TOKEN"):  # control diario: avisa si el token venció aunque no haya nada para publicar
         try:
             get_token()
         except PublishError as e:
@@ -557,6 +547,8 @@ def run():
                 del state["pending"][doc_id]
                 save_state(state, f"Instagram: vencido {doc_id}")
                 continue
+            if p.get("needs_approval") and "publicar" not in {lb["name"] for lb in issue["labels"]}:
+                continue
             permalink = publish_doc(state, doc_id, p["images"], p["caption"], p.get("story"))
             comment(p["issue"], f"Publicado en Instagram: {permalink}")
             close_issue(p["issue"])
@@ -596,6 +588,7 @@ def run():
         except PublishError as e:
             report_error("publicacion", f"Documento {doc_id}: {e}")
             errors += 1
+    errors += run_manual(state)
     try:
         notes = prensa.load_notes()
     except (requests.RequestException, ValueError) as e:
