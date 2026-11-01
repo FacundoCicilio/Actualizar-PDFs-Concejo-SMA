@@ -797,7 +797,8 @@ def destacado_slide(sdoc, fields, ordenanza=None):
         blocks += [text_block(question, (36,), DESTACADO[0], 10, bold=True),
                    text_block(answer, (size,), INK if informed else MUTED, 56, ANSWER_MAX_H, bold=informed)]
     header = f"Ordenanza {ordenanza['label']}" if ordenanza else session_title(sdoc)
-    ref = f"Fuente: {fields['fuente']}" if fields.get("fuente") else source_ref(ordenanza)
+    fuente = fields.get("fuente_placa") or fields.get("fuente")  # el pie tiene una línea: la cita larga va en el texto del post
+    ref = f"Fuente: {fuente}" if fuente else source_ref(ordenanza)
     return content_slide("DESTACADO", header, blocks, ref, "2/2", DESTACADO[0])
 
 

@@ -385,7 +385,7 @@ class PublisherTest(unittest.TestCase):
         [issue] = self.gh.by_label("instagram-vista-previa")
         self.assertIn("agua y cloacas", issue["title"])
         self.assertIn("`publicar`", issue["body"])
-        self.assertIn("Fuente: Orden del Día N° 25 y La Montaña", issue["body"])
+        self.assertIn("Fuente: La Montaña (29/10/2026), con base en el Dictamen 1445/2026", issue["body"])
         self.run_pub(26)
         self.assertEqual(self.ig.published(), [])
         issue["labels"].append({"name": "publicar"})
