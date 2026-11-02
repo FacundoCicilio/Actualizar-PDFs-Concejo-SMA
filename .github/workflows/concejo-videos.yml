@@ -1,0 +1,43 @@
+name: Videos del Concejo
+# Workflow aparte de auto-fetch.yml para poder correrlo a mano sin disparar el paso de Instagram.
+on:
+  schedule:
+    - cron: "47 10 * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: concejo-videos  # el índice es leer-modificar-escribir: nunca dos corridas a la vez
+  cancel-in-progress: false
+jobs:
+  registrar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write   # Issue "nuevo-video-concejo"
+      actions: write  # para el keepalive
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install requests huggingface_hub
+      - name: Run tests
+        run: |
+          python -m unittest test_concejo_videos
+      - name: Registrar videos
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python concejo_videos.py
+      # GitHub desactiva los crons tras 60 días sin actividad en el repo.
+      - name: Keepalive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/concejo-videos.yml/enable"
