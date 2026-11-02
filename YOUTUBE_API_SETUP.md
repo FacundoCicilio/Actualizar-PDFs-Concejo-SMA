@@ -35,3 +35,11 @@ script avisa en el log y no hace nada.
 ## Probar
 
 Corré **Actions > Videos del Concejo > Run workflow**. El log tiene que decir `N videos nuevos; M en el índice.`
+
+## Nota: subtítulos automáticos no confiables
+
+- Los subtítulos auto-generados del canal del Concejo son **NO CONFIABLES**: YouTube a veces clasifica mal el audio como
+  inglés. Pasó con el video `9zId93V3yl0` (Sesión 25/26), y tactiq.io, notegpt y la transcripción de YouTube devuelven el
+  mismo texto inservible porque usan la misma fuente.
+- Para una transcripción confiable, el pipeline debe usar Whisper (API o local) directamente sobre el audio.
+- No tiene sentido depender de `captions.download`, aun si consiguiéramos OAuth.
