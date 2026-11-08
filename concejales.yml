@@ -1,0 +1,6 @@
+# Apellidos que concejo_transcribir.py busca en las transcripciones. Agregá uno por línea.
+concejales:
+  - Brondo
+  - Petagna
+  - Vita
+  - Durando

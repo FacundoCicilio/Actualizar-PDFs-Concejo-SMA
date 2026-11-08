@@ -1,5 +1,6 @@
 # Registra en el dataset los videos nuevos del canal del Concejo y abre un Issue por cada uno, para revisarlos a mano.
 # Solo registro: no toca Instagram, destacados/ ni instagram/state.json. Ver YOUTUBE_API_SETUP.md.
+import json
 import os
 
 import requests
@@ -69,6 +70,9 @@ def main():
     for v in reversed(nuevos):
         if repo and token:
             open_issue(v, repo, token)
+    if os.getenv("GITHUB_OUTPUT"):  # el job "transcribir" del workflow corre una vez por video
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"nuevos={json.dumps([v['video_id'] for v in nuevos])}\n")
     return 0
 
 

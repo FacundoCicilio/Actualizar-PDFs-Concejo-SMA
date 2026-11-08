@@ -3,13 +3,21 @@ name: Videos del Concejo
 on:
   schedule:
     - cron: "47 10 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      video_id:
+        description: "Solo transcribir este video (vacío: revisar el canal como siempre)"
+        required: false
+        default: ""
 concurrency:
   group: concejo-videos  # el índice es leer-modificar-escribir: nunca dos corridas a la vez
   cancel-in-progress: false
 jobs:
   registrar:
+    if: ${{ !inputs.video_id }}
     runs-on: ubuntu-latest
+    outputs:
+      nuevos: ${{ steps.registrar.outputs.nuevos }}
     permissions:
       contents: read
       issues: write   # Issue "nuevo-video-concejo"
@@ -25,8 +33,10 @@ jobs:
           pip install requests huggingface_hub
       - name: Run tests
         run: |
-          python -m unittest test_concejo_videos
+          pip install pyyaml
+          python -m unittest test_concejo_videos test_concejo_transcribir
       - name: Registrar videos
+        id: registrar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
@@ -41,3 +51,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api -X PUT "repos/${{ github.repository }}/actions/workflows/concejo-videos.yml/enable"
+
+  # Un job por video: cada uno tiene su propio límite de 60 minutos.
+  transcribir:
+    needs: registrar
+    if: ${{ always() && (inputs.video_id || (needs.registrar.result == 'success' && needs.registrar.outputs.nuevos != '[]' && needs.registrar.outputs.nuevos != '')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # el commit al dataset y el comentario no compiten entre videos
+      matrix:
+        video_id: ${{ fromJSON(inputs.video_id && format('["{0}"]', inputs.video_id) || needs.registrar.outputs.nuevos) }}
+    permissions:
+      contents: read
+      issues: write   # comentario con los hallazgos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install requests huggingface_hub pyyaml faster-whisper yt-dlp
+      - name: Transcribir
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VIDEO_ID: ${{ matrix.video_id }}
+        # 45 min de transcripción: deja margen para instalar, bajar el audio y subir antes del corte de 60.
+        run: |
+          python concejo_transcribir.py "$VIDEO_ID" --minutos 45

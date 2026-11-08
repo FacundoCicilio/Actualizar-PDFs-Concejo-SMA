@@ -50,6 +50,15 @@ class ConcejoVideosTest(unittest.TestCase):
         self.assertEqual(set(save.call_args.args[2]), {"viejo", "abc"})
         issue.assert_called_once_with(VIDEO, "a/b", "t")
 
+    def test_pasa_los_nuevos_al_job_de_transcripcion(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            with mock.patch.dict("os.environ", {"GITHUB_OUTPUT": out}):
+                self.correr({"viejo": {"video_id": "viejo"}})
+            with open(out, encoding="utf-8") as f:
+                self.assertEqual(f.read(), 'nuevos=["abc"]\n')
+
     def test_sin_novedades_no_escribe_ni_abre_issues(self):
         save, issue = self.correr({"abc": VIDEO})
         save.assert_not_called()
