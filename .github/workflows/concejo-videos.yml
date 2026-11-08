@@ -52,20 +52,36 @@ jobs:
         run: |
           gh api -X PUT "repos/${{ github.repository }}/actions/workflows/concejo-videos.yml/enable"
 
-  # Un job por video: cada uno tiene su propio límite de 60 minutos.
-  transcribir:
+  # medium en 2 vCPU va a ~0,5x tiempo real: cada tramo de 15 min es un job con su propio límite de 60.
+  planificar:
     needs: registrar
     if: ${{ always() && (inputs.video_id || (needs.registrar.result == 'success' && needs.registrar.outputs.nuevos != '[]' && needs.registrar.outputs.nuevos != '')) }}
     runs-on: ubuntu-latest
+    outputs:
+      partes: ${{ steps.plan.outputs.partes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests huggingface_hub pyyaml
+      - id: plan
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          VIDEO_ID: ${{ inputs.video_id }}
+          NUEVOS: ${{ needs.registrar.outputs.nuevos }}
+        run: |
+          python concejo_transcribir.py --plan ${VIDEO_ID:-$(echo "$NUEVOS" | jq -r '.[]')}
+
+  transcribir:
+    needs: planificar
+    if: ${{ always() && needs.planificar.result == 'success' && needs.planificar.outputs.partes != '[]' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
-      fail-fast: false
-      max-parallel: 1  # el commit al dataset y el comentario no compiten entre videos
+      fail-fast: false  # un tramo caído queda marcado como faltante; los demás siguen
       matrix:
-        video_id: ${{ fromJSON(inputs.video_id && format('["{0}"]', inputs.video_id) || needs.registrar.outputs.nuevos) }}
-    permissions:
-      contents: read
-      issues: write   # comentario con los hallazgos
+        parte: ${{ fromJSON(needs.planificar.outputs.partes) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,12 +91,38 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install requests huggingface_hub pyyaml faster-whisper yt-dlp
-      - name: Transcribir
+      - name: Transcribir tramo
+        # 45 min de transcripción: deja margen para instalar y bajar el audio antes del corte de 60.
+        run: |
+          python concejo_transcribir.py --parte ${{ matrix.parte.video }} ${{ matrix.parte.desde }} ${{ matrix.parte.hasta }} ${{ matrix.parte.total }} --minutos 45 --salida partes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-${{ matrix.parte.video }}-${{ matrix.parte.desde }}
+          path: partes/
+          retention-days: 7
+
+  unir:
+    needs: [planificar, transcribir]
+    if: ${{ always() && needs.planificar.result == 'success' && needs.planificar.outputs.partes != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write   # comentario con los hallazgos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests huggingface_hub pyyaml
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parte-*
+          path: partes
+          merge-multiple: true
+      - name: Unir, subir al dataset y comentar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
           GITHUB_TOKEN: ${{ github.token }}
-          VIDEO_ID: ${{ matrix.video_id }}
-        # 45 min de transcripción: deja margen para instalar, bajar el audio y subir antes del corte de 60.
         run: |
-          python concejo_transcribir.py "$VIDEO_ID" --minutos 45
+          python concejo_transcribir.py --unir partes

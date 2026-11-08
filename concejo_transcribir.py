@@ -1,6 +1,9 @@
-# Transcribe un video del Concejo con faster-whisper, lo sube al dataset y comenta los hallazgos en su Issue.
-#   python concejo_transcribir.py VIDEO_ID [VIDEO_ID ...]                 # lo que corre el workflow
-#   python concejo_transcribir.py VIDEO_ID --audio x.mp3 --sin-subir      # local, con el audio ya bajado
+# Transcribe videos del Concejo con faster-whisper, los sube al dataset y comenta los hallazgos en su Issue.
+# En Actions (2 vCPU) medium va a ~0,5x tiempo real: el video se parte en tramos que corren en jobs paralelos.
+#   python concejo_transcribir.py --plan ID [ID ...]                 # tramos -> GITHUB_OUTPUT "partes"
+#   python concejo_transcribir.py --parte ID DESDE HASTA TOTAL       # transcribe un tramo -> partes/ID_DESDE.json
+#   python concejo_transcribir.py --unir partes/                     # junta, sube al dataset y comenta el Issue
+#   python concejo_transcribir.py ID --audio x.mp3 --sin-subir       # local: video entero, sin subir nada
 import argparse
 import json
 import os
@@ -19,8 +22,7 @@ from concejo_videos import LABEL
 PROMPT = ("Concejo Deliberante San Martín de los Andes. Concejales: Brondo, Petagna, Vita, Durando. Temas: ordenanza, "
           "dictamen, tarifa, agua, saneamiento, votación, cuarto intermedio.")
 HF_DIR = "concejo-transcripciones"
-CHUNK = 3600       # audios de más de 5 h se transcriben en tramos de 1 h
-LARGO = 5 * 3600
+TRAMO = 15 * 60    # por job de Actions; ver el tiempo medido en el workflow
 AVISO = "Transcripción automática. Puede haber errores de reconocimiento, especialmente en nombres propios."
 VOTACION = ["aprobado", "aprobada", "rechazado", "rechazada", "giro a comisión", "cuarto intermedio",
             "por la afirmativa", "por la negativa", "abstención", "unanimidad"]
@@ -37,40 +39,40 @@ def link(video_id, s):
     return f"https://youtube.com/watch?v={video_id}&t={int(s)}s"
 
 
+def segundos_iso(d):
+    """PT2H38M36S -> 9516."""
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d)
+    dd, h, mi, s = (int(x or 0) for x in m.groups())
+    return ((dd * 24 + h) * 60 + mi) * 60 + s
+
+
+def partes(video_id, total, tramo=TRAMO):
+    return [{"video": video_id, "desde": d, "hasta": min(d + tramo, total), "total": total}
+            for d in range(0, total, tramo)]
+
+
 def bajar_audio(video_id, carpeta):
+    """Solo el audio, sin convertir: pcm() lo decodifica. --download-sections era mucho más lento que bajarlo entero."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    base = ["yt-dlp", "--js-runtimes", "node", "--remote-components", "ejs:github", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", f"{carpeta}/{video_id}.%(ext)s"]
+    base = ["yt-dlp", "--js-runtimes", "node", "--remote-components", "ejs:github", "-f", "ba",
+            "-o", f"{carpeta}/{video_id}.%(ext)s"]
     for extra in ([], ["--extractor-args", "youtube:player_client=android"]):
         if subprocess.run(base + extra + [url]).returncode == 0:
-            return Path(carpeta) / f"{video_id}.mp3"
+            return next(Path(carpeta).glob(f"{video_id}.*"))
     raise SystemExit(f"yt-dlp no pudo bajar {video_id}, ni con el cliente android.")
 
 
-def duracion(audio):
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(audio)],
-                         capture_output=True, text=True, check=True).stdout
-    return float(out)
-
-
-def tramos(audio, carpeta):
-    """[(archivo, offset)]: el audio entero, o tramos de 1 h si dura más de 5 h."""
-    if duracion(audio) <= LARGO:
-        return [(audio, 0)]
-    subprocess.run(["ffmpeg", "-v", "error", "-i", str(audio), "-f", "segment", "-segment_time", str(CHUNK),
-                    "-c", "copy", f"{carpeta}/tramo%03d.mp3"], check=True)
-    return [(p, i * CHUNK) for i, p in enumerate(sorted(Path(carpeta).glob("tramo*.mp3")))]
-
-
-def pcm(archivo):
+def pcm(archivo, desde=0, hasta=None):
     """Audio mono 16 kHz float32 vía ffmpeg: el decodificador de faster-whisper (PyAV) rompe con av>=15."""
     import numpy as np
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(archivo), "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
-                         capture_output=True, check=True).stdout
+    corte = ["-ss", str(desde)] + (["-to", str(hasta)] if hasta else [])
+    raw = subprocess.run(["ffmpeg", "-v", "error", *corte, "-i", str(archivo), "-f", "s16le", "-ac", "1", "-ar", "16000",
+                          "-"], capture_output=True, check=True).stdout
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768
 
 
-def transcribir(audio, modelo="medium", limite=None):
-    """Segmentos [{start, end, text}]. Sin memoria para medium, usa small. Pasado `limite` (time.time()), corta."""
+def transcribir(audio, modelo="medium", limite=None, offset=0, hasta=None):
+    """{modelo, faltan, segments}. Sin memoria para medium usa small; pasado `limite` corta y lo anota en faltan."""
     from faster_whisper import WhisperModel
     try:
         m = WhisperModel(modelo, device="cpu", compute_type="int8")
@@ -79,23 +81,33 @@ def transcribir(audio, modelo="medium", limite=None):
             raise
         print(f"No cargó {modelo} ({e}): uso small.")
         m, modelo = WhisperModel("small", device="cpu", compute_type="int8"), "small"
-    segs, completo = [], True
-    with tempfile.TemporaryDirectory() as tmp:
-        for archivo, offset in tramos(audio, tmp):
-            out, _ = m.transcribe(pcm(archivo), language="es", initial_prompt=PROMPT, vad_filter=True,
-                                  word_timestamps=True)
-            for s in out:
-                segs.append({"start": round(offset + s.start, 2), "end": round(offset + s.end, 2),
-                             "text": s.text.strip()})
-                if len(segs) > 1 and int(segs[-1]["start"] // 600) > int(segs[-2]["start"] // 600):
-                    print(f"  ... {hms(segs[-1]['start'])}", flush=True)
-                if limite and time.time() > limite:
-                    completo = False
-                    break
-            if not completo:
-                break
-            print(f"Tramo desde {hms(offset)} listo: {len(segs)} segmentos.", flush=True)
-    return {"modelo": modelo, "completo": completo, "segments": segs}
+    audio = pcm(audio, offset, hasta)
+    out, _ = m.transcribe(audio, language="es", initial_prompt=PROMPT, vad_filter=True, word_timestamps=True)
+    segs, faltan = [], []
+    for s in out:
+        segs.append({"start": round(offset + s.start, 2), "end": round(offset + s.end, 2), "text": s.text.strip()})
+        if len(segs) > 1 and int(segs[-1]["start"] // 600) > int(segs[-2]["start"] // 600):
+            print(f"  ... {hms(segs[-1]['start'])}", flush=True)
+        if limite and time.time() > limite:
+            faltan = [[segs[-1]["end"], round(offset + len(audio) / 16000, 2)]]
+            break
+    return {"modelo": modelo, "faltan": faltan, "segments": segs}
+
+
+def unir(archivos):
+    """{video_id: resultado}. Los tramos que no llegaron (job caído) se suman a "faltan" como [desde, hasta]."""
+    por_video = {}
+    for f in archivos:
+        p = json.loads(Path(f).read_text(encoding="utf-8"))
+        por_video.setdefault(p["video"], {})[p["desde"]] = p
+    res = {}
+    for v, hechos in por_video.items():
+        ps = [hechos[d] for d in sorted(hechos)]
+        faltan = sorted([[e["desde"], e["hasta"]] for e in partes(v, ps[0]["total"]) if e["desde"] not in hechos]
+                        + [f for p in ps for f in p["faltan"]])
+        res[v] = {"modelo": "/".join(sorted({p["modelo"] for p in ps})), "completo": not faltan, "faltan": faltan,
+                  "segments": [s for p in ps for s in p["segments"]]}
+    return res
 
 
 def guardar(video_id, res, carpeta):
@@ -129,9 +141,9 @@ def analizar(segs, concejales):
 
 def comentario(video_id, hallazgos, res):
     lineas = [f"## Transcripción ({res['modelo']})", ""]
-    if not res["completo"]:
-        fin = hms(res["segments"][-1]["end"]) if res["segments"] else "0:00:00"
-        lineas += [f"**Parcial:** se cortó en {fin} por el límite de tiempo del workflow.", ""]
+    if res.get("faltan"):
+        tramos = ", ".join(f"{hms(a)}–{hms(b)}" for a, b in res["faltan"])
+        lineas += [f"**Parcial:** sin transcribir {tramos} (job caído o fuera de tiempo).", ""]
     for cat, terminos in hallazgos.items():
         lineas += [f"### {cat}", ""]
         for termino, ts in sorted(terminos.items(), key=lambda kv: kv[1][0]):
@@ -160,11 +172,7 @@ def comentar(video_id, cuerpo, repo, token):
     return True
 
 
-def procesar(video_id, args, concejales):
-    with tempfile.TemporaryDirectory() as tmp:
-        audio = args.audio or bajar_audio(video_id, tmp)
-        limite = time.time() + args.minutos * 60 if args.minutos else None
-        res = transcribir(audio, args.modelo, limite)
+def publicar(video_id, res, args, concejales):
     j, t = guardar(video_id, res, args.salida)
     print(f"{video_id}: {len(res['segments'])} segmentos ({res['modelo']}, completo={res['completo']}) en {j.parent}")
     cuerpo = comentario(video_id, analizar(res["segments"], concejales), res)
@@ -181,19 +189,58 @@ def procesar(video_id, args, concejales):
         print(f"No encontré el Issue de {video_id}: el resumen queda solo en el log.\n{cuerpo}")
 
 
+def plan(videos):
+    from concejo_videos import youtube
+    key = os.environ["YOUTUBE_API_KEY"]
+    todas = []
+    for v in youtube("videos", key, part="contentDetails", id=",".join(videos)):
+        total = segundos_iso(v["contentDetails"]["duration"])
+        if not total:  # YouTube da P0D a un vivo en curso o programado
+            print(f"{v['id']}: duración 0 (¿vivo?). Correr a mano cuando termine: workflow_dispatch con video_id.")
+        todas += partes(v["id"], total)
+    print(f"{len(todas)} tramos de {TRAMO // 60} min para {len(videos)} videos.")
+    with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as f:
+        f.write(f"partes={json.dumps(todas)}\n")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("videos", nargs="+")
+    ap.add_argument("videos", nargs="*")
+    ap.add_argument("--plan", action="store_true", help="calcula los tramos de los videos para el workflow")
+    ap.add_argument("--parte", nargs=4, metavar=("ID", "DESDE", "HASTA", "TOTAL"))
+    ap.add_argument("--unir", type=Path, help="carpeta con los tramos de --parte")
     ap.add_argument("--audio", type=Path, help="audio ya bajado (un solo video)")
     ap.add_argument("--modelo", default="medium")
     ap.add_argument("--minutos", type=float, help="corta la transcripción pasados estos minutos y la marca parcial")
     ap.add_argument("--salida", type=Path, default=Path("data/concejo-transcripciones"))
     ap.add_argument("--sin-subir", action="store_true", help="no sube al dataset ni comenta: imprime el resumen")
     args = ap.parse_args()
+    limite = time.time() + args.minutos * 60 if args.minutos else None
+    if args.plan:
+        plan(args.videos)
+        return 0
+    if args.parte:
+        v, desde, hasta, total = args.parte[0], *map(int, args.parte[1:])
+        with tempfile.TemporaryDirectory() as tmp:
+            res = transcribir(bajar_audio(v, tmp), args.modelo, limite, desde, hasta)
+        args.salida.mkdir(parents=True, exist_ok=True)
+        (args.salida / f"{v}_{desde:06d}.json").write_text(json.dumps(
+            {"video": v, "desde": desde, "hasta": hasta, "total": total, **res}, ensure_ascii=False), encoding="utf-8")
+        print(f"Tramo {hms(desde)}–{hms(hasta)}: {len(res['segments'])} segmentos, faltan={res['faltan']}.")
+        return 0
     concejales = yaml.safe_load((Path(__file__).parent / "concejales.yml").read_text(encoding="utf-8"))["concejales"]
+    if args.unir:
+        archivos = sorted(args.unir.glob("*.json"))
+        if not archivos:
+            raise SystemExit(f"No hay tramos en {args.unir}: fallaron todos los jobs de transcripción.")
+        for v, res in unir(archivos).items():
+            publicar(v, res, args, concejales)
+        return 0
     for v in args.videos:
-        procesar(v, args, concejales)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = transcribir(args.audio or bajar_audio(v, tmp), args.modelo, limite)
+        publicar(v, {**res, "completo": not res["faltan"]}, args, concejales)
     return 0
 
 
