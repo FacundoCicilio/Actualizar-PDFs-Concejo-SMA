@@ -39,7 +39,7 @@ def link(video_id, s):
 
 def bajar_audio(video_id, carpeta):
     url = f"https://www.youtube.com/watch?v={video_id}"
-    base = ["yt-dlp", "--js-runtimes", "node", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", f"{carpeta}/{video_id}.%(ext)s"]
+    base = ["yt-dlp", "--js-runtimes", "node", "--remote-components", "ejs:github", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", f"{carpeta}/{video_id}.%(ext)s"]
     for extra in ([], ["--extractor-args", "youtube:player_client=android"]):
         if subprocess.run(base + extra + [url]).returncode == 0:
             return Path(carpeta) / f"{video_id}.mp3"
@@ -61,6 +61,14 @@ def tramos(audio, carpeta):
     return [(p, i * CHUNK) for i, p in enumerate(sorted(Path(carpeta).glob("tramo*.mp3")))]
 
 
+def pcm(archivo):
+    """Audio mono 16 kHz float32 vía ffmpeg: el decodificador de faster-whisper (PyAV) rompe con av>=15."""
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(archivo), "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.int16).astype(np.float32) / 32768
+
+
 def transcribir(audio, modelo="medium", limite=None):
     """Segmentos [{start, end, text}]. Sin memoria para medium, usa small. Pasado `limite` (time.time()), corta."""
     from faster_whisper import WhisperModel
@@ -74,11 +82,13 @@ def transcribir(audio, modelo="medium", limite=None):
     segs, completo = [], True
     with tempfile.TemporaryDirectory() as tmp:
         for archivo, offset in tramos(audio, tmp):
-            out, _ = m.transcribe(str(archivo), language="es", initial_prompt=PROMPT, vad_filter=True,
+            out, _ = m.transcribe(pcm(archivo), language="es", initial_prompt=PROMPT, vad_filter=True,
                                   word_timestamps=True)
             for s in out:
                 segs.append({"start": round(offset + s.start, 2), "end": round(offset + s.end, 2),
                              "text": s.text.strip()})
+                if len(segs) > 1 and int(segs[-1]["start"] // 600) > int(segs[-2]["start"] // 600):
+                    print(f"  ... {hms(segs[-1]['start'])}", flush=True)
                 if limite and time.time() > limite:
                     completo = False
                     break
