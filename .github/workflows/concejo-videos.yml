@@ -91,6 +91,13 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install requests huggingface_hub pyyaml faster-whisper yt-dlp
+      - name: Preparar cookies de YouTube
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          echo "$YOUTUBE_COOKIES" > /tmp/yt_cookies.txt
+          chmod 600 /tmp/yt_cookies.txt
+          echo "YT_COOKIES_FILE=/tmp/yt_cookies.txt" >> $GITHUB_ENV
       - name: Transcribir tramo
         # 45 min de transcripción: deja margen para instalar y bajar el audio antes del corte de 60.
         run: |
