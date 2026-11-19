@@ -2,8 +2,8 @@ name: Videos del Concejo
 # Workflow aparte de auto-fetch.yml para poder correrlo a mano sin disparar el paso de Instagram.
 on:
   schedule:
-    - cron: "47 10 * * *"
-  workflow_dispatch:
+  - cron: "0 18 * * *"    # 15:00 ARG — por si subieron el video temprano
+  - cron: "0 0 * * *"     # 21:00 ARG — por si lo subieron tarde  workflow_dispatch:
     inputs:
       video_id:
         description: "Solo transcribir este video (vacío: revisar el canal como siempre)"
