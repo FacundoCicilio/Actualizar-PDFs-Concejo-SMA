@@ -138,6 +138,9 @@ def upload_images(paths, folder):
 
 def check_caption(caption):
     """El texto del post entra en Instagram: si no, falla acá y no después de crear los contenedores."""
+    found = ic.ids(caption)
+    if found:  # criterio de privacidad: el prompt lo pide, el código lo garantiza
+        raise PublishError(f"El texto del post trae documentos o números que no se publican ({len(found)}): no se publica.")
     n = ic.caption_len(caption)
     if n > ic.CAPTION_MAX:
         raise CaptionTooLong(f"El texto del post tiene {n} caracteres y Instagram admite hasta {ic.CAPTION_MAX}: "

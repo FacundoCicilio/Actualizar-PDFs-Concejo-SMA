@@ -212,11 +212,33 @@ class NivelesDePrivacidadTest(unittest.TestCase):
         for caso, nombre in (("contratacion", "Rodolfo Ficticio Lanús"), ("locacion", "Marta Imaginaria")):
             o = self.parse(caso)
             self.assertEqual(o.get("nivel"), "publico", caso)
-            self.assertIn(nombre, o["text"])                       # el buscador lo muestra
-            self.assertNotIn(nombre.split()[-1], o["text_ig"])     # Instagram, nunca
-            self.assertIn("un profesional", o["text_ig"])  # "contratación directa de un profesional"
-            self.assertEqual(boletin.as_note(o)["text"], o["text_ig"])
+            self.assertIn(nombre, o["text"])                    # recibe plata pública: con nombre en todos lados
+            self.assertIn(nombre, boletin.as_note(o)["text"])   # también en Instagram y el newsletter
+            self.assertNotIn("text_ig", o)
             self.sin_datos(o)
+
+    def test_trato_distinto_con_nombre_sin_numeros(self):  # la 15.799/26: taxi por vía de excepción
+        body = ("ARTÍCULO 1º.- AUTORÍZASE, por vía de excepción al Artículo 13 inciso b) de la Ordenanza 4166/01, la "
+                "continuidad del servicio de taxi con el vehículo dominio AA-350-PL, afectado a la licencia comercial "
+                "nº 1399, cuyo titular es el Sr. Pedro INVENTO, DNI 30.444.555.-")
+        o = self.parse_body(body)
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Pedro INVENTO", o["text"])
+        for dato in ("AA-350-PL", "1399", "30.444.555"):
+            self.assertNotIn(dato, json.dumps(o, ensure_ascii=False))
+        self.assertIn("licencia comercial", o["text"])
+
+    def test_condonacion_con_nombre_subsidio_sin(self):
+        o = self.parse_body("ARTÍCULO 1º.- CONDÓNASE la deuda de la Sra. Laura NOEXISTE, DNI 32.666.777, por tasas.-")
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Laura NOEXISTE", o["text"])
+        o = self.parse_body("ARTÍCULO 1º.- OTÓRGASE un subsidio a la Sra. Laura NOEXISTE, DNI 32.666.777.-")
+        self.assertTrue(o["particular"])
+        self.assertNotIn("text", o)
+
+    def parse_body(self, body):
+        [o] = boletin.parse(self.HEAD + body + self.FIN, 827, "u")
+        return o
 
     def test_actividad_privada_autorizada_sin_nombre(self):
         for caso, apellido in (("licencia", "INVENTO"), ("carrito", "SUPUESTA")):

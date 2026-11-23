@@ -42,6 +42,63 @@ class AnonimizarTest(unittest.TestCase):
         for original, esperado in casos.items():
             self.assertEqual(ic.anonymize(original), esperado)
 
+    def test_criterio_con_nombre(self):
+        con = ["AUTORÍZASE por vía de excepción al Sr. Pedro Prueba a continuar con el taxi",
+               "CONDÓNASE la deuda de la Sra. Ana Prueba",
+               "EXÍMESE al Sr. Juan Prueba del pago de la tasa",
+               "la compra directa a la Sra. Rosa Prueba"]
+        sin = ["EXÍMESE al Sr. Juan Prueba en el marco del régimen general de jubilados",
+               "otórgase un subsidio por excepción a la Sra. Ana Prueba",
+               "AUTORÍZASE la licencia comercial del Sr. Pedro Prueba para el rubro kiosco"]
+        for t in con:
+            self.assertEqual(ic.anonymize(t), t)
+        for t in sin:
+            self.assertNotIn("Prueba", ic.anonymize(t))
+
+    def test_por_oracion(self):
+        t = ("Se aprobó la contratación directa de la Sra. Ana Prueba para el agua. "
+             "En la sesión habló la Sra. Rosa Testigo sobre su lote.")
+        out = ic.anonymize(t)
+        self.assertIn("Sra. Ana Prueba", out)       # recibe plata pública
+        self.assertNotIn("Testigo", out)            # otra oración, trámite común
+        self.assertEqual(len(ic.oraciones("El Sr. Juan Pérez y el Dr. J. Gómez, de Obras S.A. firmaron. Listo.")), 2)
+
+    def test_casos_del_boletin(self):
+        # 15.717: "con carácter excepcional" (una sesión) no es un trato distinto
+        self.assertFalse(ic.con_nombre("DISPÓNESE, con carácter excepcional, que la presencia física en el recinto se limita"))
+        # apellido en mayúsculas: el nombre entero se anonimiza
+        self.assertEqual(ic.anonymize("propiedad de la Sra. María BRITO DEL PINO, para el rubro"), "propiedad de una vecina, para el rubro")
+        # 15.793: nomenclaturas separadas por ";" y sin la palabra delante
+        t = "los inmuebles con las nomenclaturas catastrales; 15-21-072-0794-0000; 15-21-072- 0595-0000; y 091-4396-0000, cedidos"
+        self.assertEqual(ic.ids(ic.sin_ids(t)), [])
+        self.assertIn("31-08-2027", ic.sin_ids("vigencia hasta el 31-08-2027"))  # una fecha no es catastro
+        for raw, esperado in (("nomenclatura catastral 15-20-066-4048-0000 de la Chacra 4", "nomenclatura catastral de la Chacra 4"),
+                              ("Nomenclatura Catastral 15-21-090-\n8926-0016. Propiedad", "Nomenclatura Catastral. Propiedad"),
+                              ("Nomenclatura Catastral 15-RR-023-5322-0355. Propiedad", "Nomenclatura Catastral. Propiedad"),
+                              ("dominio AA-350-PL, afectado", "dominio, afectado")):
+            self.assertEqual(ic.sin_ids(raw), esperado)
+
+    def test_cargos_y_social(self):
+        self.assertTrue(ic.con_nombre("El Concejo designó a los integrantes titulares de la Junta Electoral"))
+        self.assertTrue(ic.con_nombre("Desígnase director del ENSATUR al Sr. Juan Prueba"))
+        self.assertFalse(ic.con_nombre("El Ejecutivo designará el lugar del evento organizado por la Sra. Ana Prueba"))
+        for t in ("EXÍMESE al Sr. Juan Prueba, jubilado, del pago de la tasa",
+                  "CONDÓNASE la deuda de la Sra. Ana Prueba, persona con discapacidad"):
+            self.assertNotIn("Prueba", ic.anonymize(t))
+        # lo social veta en todo el ítem, aunque esté en otro artículo
+        self.assertNotIn("Prueba", ic.anonymize("ARTÍCULO 1º.- EXÍMESE al Sr. Juan Prueba de la tasa.- ARTÍCULO 2º.- "
+                                                "El beneficiario es jubilado."))
+
+    def test_nunca_documentos_ni_numeros(self):
+        t = ("vehículo dominio AA-350-PL, licencia comercial nº 1399, DNI 30.444.555, CUIT 30-71642628-5, "
+             "nomenclatura catastral 15-20-047-1234, partida inmobiliaria 12345, partida presupuestaria 2.1.1")
+        out = ic.sin_ids(t)
+        for x in ("350", "1399", "30.444.555", "71642628", "047-1234", "12345"):
+            self.assertNotIn(x, out)
+        self.assertIn("licencia comercial", out)
+        self.assertIn("partida presupuestaria 2.1.1", out)  # no identifica a nadie
+        self.assertEqual(len(ic.ids(t)), 6)
+
     def test_se_mantienen_funcionarios_e_instituciones(self):
         for texto in ["a cargo del Sr. Intendente Municipal Dr. Carlos Saloniti",
                       "Miembro Informante: Concejal Brondo",
@@ -161,8 +218,7 @@ class SalidaTest(unittest.TestCase):
         self.assertIn("Sesión N° 23 · 8 de octubre de 2026", cap)
         self.assertIn("trata 6 puntos", cap)
         self.assertIn("• Modificación Ordenanza 4166/2001 Tarifa taxis y remisses.", cap)  # sin "Dictamen:"
-        self.assertNotIn("Antileo", cap)
-        self.assertIn("contratación directa de una vecina", cap)
+        self.assertIn("contratación directa de la Sra. Silvia Antileo", cap)  # recibe plata pública: con nombre
         self.assertIn("link en la bio", cap)
         self.assertIn("#SanMartinDeLosAndes", cap)
         self.assertLessEqual(len(cap), 2200)  # límite de Instagram

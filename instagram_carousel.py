@@ -72,9 +72,93 @@ def split_action(que_dice):
     return (m.group(1), m.group(2)) if m else ("", que_dice or "")
 
 
-# ------------------------------------------------------------------ anonimización
-# Personas particulares -> "un vecino" / "una vecina". Concejales, funcionarios e instituciones quedan.
-_NAME = r"[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+(?:de\s+|del\s+)?[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,4}"
+# ------------------------------------------------------------------ privacidad (Instagram, Boletín y newsletter)
+# Con nombre: funcionarios y concejales, quien recibe plata pública y quien recibe un trato distinto al general.
+# Sin nombre: quien hizo un trámite común. Nunca: documentos ni números sueltos (licencia, matrícula, partida, catastro).
+PLATA_PUBLICA_PAT = re.compile(r"contrataci[oó]n(?:es)?\s+directas?|contr[aá]tase|compras?\s+directas?|locaci[oó]n\s+de\s+"
+                               r"(?:obra|servicio)|honorario|reconoc\w*\s+(?:de\s+)?(?:la\s+)?deuda|leg[ií]timo\s+abono"
+                               r"|ab[oó]nese|p[aá]guese|proveedor", re.I)
+# "\bexcepción\b": "con carácter excepcional" (p. ej. una sesión) no es un trato distinto a una persona.
+TRATO_PAT = re.compile(r"\bexcepci[oó]n(?:es)?\b|except[uú]a|cond[oó]n|\bex[ií]m|exenci|fuera\s+de\s+(?:la\s+)?norma", re.I)
+# Personas designadas en un cargo ("designó a los integrantes titulares", "desígnase director"); no cualquier "designa".
+CARGO_PAT = re.compile(r"(?:des[ií]gna(?:se|r)?|design[oó])\b[^.;]{0,120}?\b(?:integrantes?|titular(?:es)?|suplentes?"
+                       r"|miembros?|juez|jueza|director\w*|secretari\w*)|integrantes\s+de\s+la\s+(?:junta|comisi[oó]n)", re.I)
+# Ayuda social (también eximiciones y condonaciones a jubilados, pensionados o personas con discapacidad): sin nombre
+# aunque sea plata pública o un trato distinto. Régimen general: trámite común, sin nombre.
+SOCIAL_PAT = re.compile(r"subsidio|pensi[oó]n|\bbecas?\b|vulnerab|discapacid|jubilad", re.I)
+REGIMEN_GENERAL_PAT = re.compile(r"r[eé]gimen\s+general|plan\s+(?:general\s+)?de\s+(?:pagos|regularizaci)", re.I)
+PRIVACIDAD = ("Nombrá solo a funcionarios y concejales, a quien recibe plata pública (contrato directo, pago, compra) y a "
+              "quien recibe un trato distinto al general (excepción, condonación, habilitación fuera de norma, eximición "
+              "particular); a quien hizo un trámite común no lo nombres (usá 'un vecino' o 'una vecina'). Nunca escribas "
+              "DNI, CUIT, CUIL ni números de licencia, matrícula, partida, nomenclatura catastral o dominio.")
+# "DNI" sin borde de palabra adelante (también "particularDNI 12.345.678"); L.E. y L.C., con borde: son cortos
+DNI_PAT = re.compile(r"(?:D\.?\s*N\.?\s*I\.?|\b(?:L\.?E\.?|L\.?C\.?))\s*:?\s*(?:N[º°o]\.?\s*)?[A-Z]?[\d.,\s]{6,12}\d", re.I)
+# CUIT/CUIL: 20, 23, 24 y 27 son personas; 30, 33 y 34, empresas e instituciones. Ninguno se publica.
+CUIT_PAT = re.compile(r"\bC\.?U\.?I\.?[TL]\.?\s*:?\s*(?:N[º°o]\.?\s*)?(\d{2})\s*-?\s*[\d.]{7,10}\s*-?\s*\d", re.I)
+# "licencia comercial nº 1399", "dominio AA-350-PL", "nomenclatura catastral 15-20-047": queda la palabra, sin el número.
+# La partida presupuestaria ("partida 2.1.1") no identifica a nadie: solo la inmobiliaria o catastral.
+NUM_PAT = re.compile(r"(?P<lab>\b(?:licencias?(?:\s+(?:de\s+)?[a-záéíóú]+)?|partidas?\s+(?:inmobiliarias?|catastral(?:es)?)"
+                     r"|nomenclaturas?\s+catastral(?:es)?|matr[ií]culas?(?:\s+(?:de\s+)?[a-záéíóú]+)?|padr[oó]n|legajos?"
+                     r"|chapas?(?:\s+patente)?|dominios?))[\s:;,]*(?:N[º°o]\.?|n[uú]mero)?[\s:]*"
+                     # el número: cortado por saltos de línea ("15-21-090-\n8926-0016"), con letras en mayúscula solo
+                     # entre guiones o al final ("15-RR-023-…", "AA-350-PL"); "… 0000 de la Chacra" no se come el "de"
+                     r"(?-i:[A-Z]{0,3})[-\s]?\d(?:[\d\-/]|\.(?=\d)|\s+(?=[\d-])|(?-i:[A-Z]{1,3})(?=-))*(?-i:[A-Z]{1,3}\b)?", re.I)
+# Nomenclatura catastral de Neuquén sin la palabra delante ("…catastrales; 15-21-072-0794-0000; 15-21-072- 0595-0000")
+CATASTRO_PAT = re.compile(r"\b\d{2}-\s*(?:\d{2}|RR)-\s*\d{3}-\s*\d{4}(?:-\s*\d{4})?(?:/\d{4})?\b|\b\d{3}-\d{4}-\d{4}\b")
+
+
+def con_nombre(text):
+    """La oración (o el ítem) es de alguien que se nombra: plata pública, trato distinto al general o un cargo. No la
+    ayuda social. Sobre una nota entera usá por_oracion: una contratación en una oración no nombra al resto."""
+    text = text or ""
+    if SOCIAL_PAT.search(text):
+        return False
+    trato = TRATO_PAT.search(text) and not REGIMEN_GENERAL_PAT.search(text)
+    return bool(PLATA_PUBLICA_PAT.search(text) or trato or CARGO_PAT.search(text))
+
+
+def ids(text):
+    """Documentos y números sueltos que no pueden salir nunca: lo que encuentre, para avisar o rechazar."""
+    text = text or ""
+    found = [m.group(0).strip() for p in (DNI_PAT, CUIT_PAT, NUM_PAT) for m in p.finditer(text)]
+    return found + [m.group(0) for m in CATASTRO_PAT.finditer(NUM_PAT.sub("", text))]  # sin contar dos veces el mismo
+
+
+def sin_ids(text):
+    text = NUM_PAT.sub(r"\g<lab>", CUIT_PAT.sub("", DNI_PAT.sub("", text or "")))
+    text = re.sub(rf"[;,]?\s*(?:{CATASTRO_PAT.pattern})", "", text)  # con su separador: "…catastrales; 15-21-…;"
+    return re.sub(r"\s+([,.;])", r"\1", re.sub(r"[ \t]{2,}", " ", text))
+
+
+# Fin de oración: ". ", "; ", ".- " (artículos), salvo abreviaturas ("Sr. Juan", "Art. 5", "S.A. ") e iniciales ("J.").
+_FIN_PAT = re.compile(r"[.;!?]-?\s+")
+_ABBR_PAT = re.compile(r"(?:\b(?:Sra?|Srta|Dra?|Ing|Arq|Lic|Prof|Cdora?|Agrim|Ftal|T[eé]c|Mg|MMO|Arts?|[Ii]nc|Nro|Sres)"
+                       r"|\b[A-ZÁÉÍÓÚÑ]|\bS\.A|\bS\.R\.L|\bT\.O)\.$")
+
+
+def oraciones(text):
+    out, start = [], 0
+    for m in _FIN_PAT.finditer(text or ""):
+        if not _ABBR_PAT.search(text[start:m.start() + 1]):
+            out.append(text[start:m.end()])
+            start = m.end()
+    return out + [text[start:]] if text and start < len(text) else out
+
+
+def por_oracion(text, sin_nombre):
+    """Aplica sin_nombre a cada oración que no es con_nombre. Si el texto habla de ayuda social en cualquier parte,
+    a todo: "exímese al Sr. X" en un artículo y "jubilado" en otro no lo nombra."""
+    text = text or ""
+    if SOCIAL_PAT.search(text):
+        return sin_nombre(text)
+    return "".join(o if con_nombre(o) else sin_nombre(o) for o in oraciones(text))
+
+
+# Personas particulares -> "un vecino" / "una vecina". Concejales, funcionarios e instituciones quedan, y también quien
+# recibe plata pública o un trato distinto al general (con_nombre).
+# Palabras con mayúscula inicial o todo en mayúsculas: "María BRITO DEL PINO" es un solo nombre.
+_WORD = r"[A-ZÁÉÍÓÚÑ](?:[a-záéíóúñ]+|[A-ZÁÉÍÓÚÑ]+)"
+_NAME = _WORD + r"(?:\s+(?:de\s+|del\s+|DE\s+|DEL\s+)?" + _WORD + r"){0,4}"
 _ART = r"(?P<art>\b(?:del|de la|el|la|al|a la)\s+)?"
 _OFFICIAL = re.compile(r"(?:Intendente|Viceintendente|Concejal|Secretari|President|Director|Ministr|Gobernador|Juez|Defensor)", re.I)
 _TITLE_PAT = re.compile(_ART + r"(?P<t>Sra|Srta|Sr|Dra|Dr|Ing|Arq|Lic|Prof|Cdora|Cdor)\.\s+(?P<n>" + _NAME + r")")
@@ -92,6 +176,11 @@ def _with_article(art, noun, female):
 
 
 def anonymize(text):
+    """Oración por oración: con nombre solo donde la oración misma es de plata pública, trato distinto o un cargo."""
+    return por_oracion(text, _anonymize)
+
+
+def _anonymize(text):
     def title(m):
         before = text[max(0, m.start() - 40):m.start()]
         if _OFFICIAL.search(before) or _OFFICIAL.match(m.group("n")):  # "Intendente Municipal Dr. …", "Sr. Intendente …"
@@ -144,8 +233,8 @@ CRIOLLO_SYSTEM = (
     "tratar el Concejo y a quién afectaría. Es el orden del día de una sesión que todavía no se votó: no des nada por "
     "aprobado ni decidido (nada de 'se aprueba' o 'se modifica'); usá formas como 'El Concejo trata…' o 'Se propone…', "
     "y para cambios de normas o tarifas 'El Concejo trata un cambio en…' (no 'trata modificar'). "
-    "No inventes datos que no estén en el texto. No nombres a personas particulares (usá "
-    "'un vecino' o 'una vecina'). Sin comillas, sin emojis y sin prefijos como 'En criollo:'."
+    "No inventes datos que no estén en el texto. " + PRIVACIDAD +
+    " Sin comillas, sin emojis y sin prefijos como 'En criollo:'."
 )
 DOTENV = Path(__file__).with_name(".env")  # está en .gitignore
 # Es un orden del día: nada está votado. Si el modelo igual lo da por hecho, la línea se descarta.
@@ -254,8 +343,8 @@ def select_items(doc, max_items=MAX_ITEMS):
 
 
 def official_text(item):
-    """Texto oficial que se muestra (y se manda a Claude): sin etiqueta, primer proyecto y anonimizado."""
-    return anonymize(slide_text(split_action(item.get("que_dice"))[1]))
+    """Texto oficial que se muestra (y se manda a Claude): sin etiqueta, primer proyecto, anonimizado y sin documentos."""
+    return sin_ids(anonymize(slide_text(split_action(item.get("que_dice"))[1])))
 
 
 def date_long(date_str):
@@ -629,15 +718,14 @@ NOTE_SYSTEM = (
     "Devolvé una sola oración de hasta 25 palabras, en español rioplatense simple, que diga qué aprobó el Concejo y a "
     "quién afecta. Podés decir 'se aprobó' o 'el Concejo aprobó': la nota lo confirma. Escribí con tus palabras, sin "
     "copiar frases de la nota. Usá solo datos que estén en la nota: no inventes montos, fechas ni plazos. Si la nota "
-    "cuenta varios temas, resumí el principal. No nombres a personas particulares (usá 'un vecino' o 'una vecina'). "
-    "Sin comillas, sin emojis y sin prefijos."
+    "cuenta varios temas, resumí el principal. " + PRIVACIDAD + " Sin comillas, sin emojis y sin prefijos."
 )
 DESTACADO_SYSTEM = (
     "Explicás a vecinos de San Martín de los Andes una norma que aprobó el Concejo Deliberante, a partir de una nota "
     "de prensa. Completá: titular (hasta 10 palabras), que_cambia, a_quien_afecta y desde_cuando (una oración corta "
     "cada uno), en español rioplatense simple y con tus palabras, sin copiar frases de la nota. Usá SOLO datos que "
     "estén en la nota (montos, porcentajes, plazos, alcance). Si la nota no informa alguno de los tres, dejalo vacío "
-    "(\"\"): nunca lo deduzcas ni lo inventes. No nombres a personas particulares. Sin emojis. "
+    "(\"\"): nunca lo deduzcas ni lo inventes. " + PRIVACIDAD + " Sin emojis. "
     "El titular es descriptivo y neutral: dice qué se modificó, sin calificar la medida (nada de 'alivio', "
     "'beneficio', 'golpe', 'ayuda' ni 'mejora'). Si la nota tiene medidas que bajan y otras que suben lo que se paga, "
     "el titular no la presenta como solo una baja ni como solo una suba: nombra lo que se modificó. Ejemplo: "
@@ -709,7 +797,7 @@ def destacado_fields(note, ordenanza=False):
             data = json.loads(_complete(ORDENANZA_SYSTEM if ordenanza else DESTACADO_SYSTEM, note, DESTACADO_FORMAT) or "")
         except ValueError:
             continue
-        fields = {k: anonymize(str(data.get(k) or "").strip()) for k in DESTACADO_FIELDS}
+        fields = {k: sin_ids(anonymize(str(data.get(k) or "").strip())) for k in DESTACADO_FIELDS}
         fields = {k: v if v and only_note_numbers(v, note) else "" for k, v in fields.items()}
         if fields["titular"] and titular_ok(fields["titular"], note):
             return fields

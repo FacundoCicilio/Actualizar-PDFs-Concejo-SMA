@@ -16,7 +16,7 @@ from hf_dataset_store import DATASET_REPO_ID, load_json, save_json
 
 BASE = "http://boletinoficial.sma.gob.ar"
 STORE_PATH = "boletin/boletines.json"
-STORE_VERSION = 2  # 2: tres niveles de privacidad (público / actividad / privada)
+STORE_VERSION = 3  # 2: tres niveles de privacidad; 3: con nombre plata pública y trato distinto (ic.con_nombre)
 RECHECK = 3  # los últimos boletines guardados se revisan por si los reemplazaron con el mismo nombre
 
 LINK_PAT = re.compile(r"""href=["'](https?://boletinoficial\.sma\.gob\.ar/wp-content/uploads/\d{4}/\d{2}/bom-(\d{3,4})[^"'/]*\.pdf)["']""", re.I)
@@ -32,10 +32,8 @@ SESSION_TEXT_PAT = re.compile(rf"Sesi[oó]n\s+(Ordinaria|Especial)\s+N[º°o]?\s
 END_PAT = re.compile(r"^\s*(?:ANEXO\b|RESUMEN AUDIENCIA|DECRETOS?\s*$|RESOLUCI[OÓ]N(?:ES)?\s+N[º°])", re.M | re.I)
 LAST_ARTICLE_PAT = re.compile(r"Comun[ií]quese al Departamento Ejecutivo Municipal\.?-?", re.I)
 ARTICLE1_PAT = re.compile(r"ART[ÍI]CULO\s*1\s*[º°]?\s*\.?\s*-?\s*(.+?)(?=ART[ÍI]CULO\s*2\b|$)", re.I | re.S)
-# "DNI" sin borde de palabra adelante (también "particularDNI 12.345.678"); L.E. y L.C., con borde: son cortos
-DNI_PAT = re.compile(r"(?:D\.?\s*N\.?\s*I\.?|\b(?:L\.?E\.?|L\.?C\.?))\s*:?\s*(?:N[º°o]\.?\s*)?[A-Z]?[\d.,\s]{6,12}\d", re.I)
-# CUIT/CUIL: 20, 23, 24 y 27 son personas; 30, 33 y 34, empresas e instituciones (esas no hacen particular a la norma).
-CUIT_PAT = re.compile(r"\bC\.?U\.?I\.?[TL]\.?\s*:?\s*(?:N[º°o]\.?\s*)?(\d{2})\s*-?\s*[\d.]{7,10}\s*-?\s*\d", re.I)
+DNI_PAT, CUIT_PAT = ic.DNI_PAT, ic.CUIT_PAT  # el criterio de privacidad vive en instagram_carousel
+# CUIT de empresas e instituciones (30, 33, 34): no hacen particular a la norma, pero tampoco se publican.
 PERSON_CUIT = {"20", "23", "24", "27"}
 ADJ_PAT = re.compile(r"adjud[ií]c|usufructo", re.I)  # "ADJUDÍCASE"
 CHACRA_PAT = re.compile(r"\bChacra\s+(\d+)", re.I)
@@ -113,34 +111,49 @@ def _particular(m):
 
 
 def strip_ids(text):
-    """Sin DNI, CUIL/CUIT ni domicilio (los nombres quedan): lo que se muestra de una ordenanza de rol público."""
-    text = re.sub(r"\s+", " ", DOMICILIO_PAT.sub("", CUIT_PAT.sub("", DNI_PAT.sub("", text))))
+    """Sin documentos, números sueltos (licencia, dominio, partida) ni domicilio; los nombres quedan."""
+    text = re.sub(r"\s+", " ", DOMICILIO_PAT.sub("", ic.sin_ids(text)))
     return re.sub(r"\s*,(?:\s*,)+", ",", text).strip()  # "un particular, , para" -> "un particular, para"
 
 
 def depersonalize(text):
-    """Sin nombres de personas físicas ("un particular") ni documentos ni domicilio. Las empresas (S.A., S.R.L.) quedan."""
+    """Sin nombres de personas físicas ("un particular") ni documentos ni domicilio. Las empresas (S.A., S.R.L.) quedan.
+    Oración por oración: donde se nombra a quien recibe plata pública o un trato distinto (ic.con_nombre), el nombre queda."""
+    return strip_ids(ic.por_oracion(text, _depersonalize))
+
+
+def _depersonalize(text):
     text = PROF_PAT.sub(lambda m: _particular(m).replace("particular", "profesional"), text)  # antes: NAME_ID se come el título
     text = NAME_ID_PAT.sub(_particular, text)
     text = ROLE_NAME_PAT.sub(lambda m: f"{m.group('role')} un particular", text)
-    text = re.sub(r"\bun[a]? vecin[oa]\b", "un particular", ic.anonymize(text))
-    return strip_ids(text)
+    return re.sub(r"\bun[a]? vecin[oa]\b", "un particular", ic.anonymize(text))
 
 
 def privacy_level(body):
-    """None si no nombra personas; si no, "privada", "actividad" o "publico" (ver los patrones)."""
+    """None si no nombra personas; si no, "privada", "actividad" o "publico" (ver los patrones). "publico" va con
+    nombre: plata pública, trato distinto al general (excepción, condonación, eximición particular) o un cargo. Antes
+    que nada, la ayuda social (subsidio, pensión): privada."""
     if not leaks(body):
         return None
+    # la oración que da el trato o la plata nombra a la persona ("honorarios… a cargo de la parte interesada", no)
+    if not ic.SOCIAL_PAT.search(body) and any(ic.con_nombre(s) and _nombra(s) for s in ic.oraciones(body)):
+        return "publico"
     if PRIVADA_PAT.search(body):
         return "privada"
     if ACTIVIDAD_PAT.search(body):
         return "actividad"
-    return "publico" if PUBLICO_PAT.search(body) else "privada"
+    return "publico" if PUBLICO_PAT.search(body) and not ic.SOCIAL_PAT.search(body) else "privada"
+
+
+def _nombra(sentence):
+    """La oración nombra a una persona física (título, rol o documento), sin mirar si va con nombre."""
+    return (bool(DNI_PAT.search(sentence)) or any(m.group(1) in PERSON_CUIT for m in CUIT_PAT.finditer(sentence))
+            or ic._anonymize(sentence) != sentence or _depersonalize(sentence) != sentence)
 
 
 def scrub(text):
-    """Texto de una ordenanza que no nombra personas: sin documentos (p. ej. CUIT de empresas)."""
-    return re.sub(r"\s+", " ", ic.anonymize(CUIT_PAT.sub("", DNI_PAT.sub("", text)))).strip()
+    """Texto de una ordenanza que no nombra personas: sin documentos ni números sueltos (p. ej. CUIT de empresas)."""
+    return re.sub(r"\s+", " ", ic.sin_ids(ic.anonymize(text))).strip()
 
 
 def is_particular(body):
@@ -181,8 +194,8 @@ def parse(text, numero, url):
         o["a_revisar"] = o["session"] is None  # sin sesión no se publica: queda listada en la vista previa
         level = privacy_level(body)
         anon = depersonalize(body) if level in ("actividad", "publico") else ""
-        if level in ("actividad", "publico") and leaks(anon):
-            level = "privada"  # no se pudo sacar el nombre con seguridad: se oculta
+        if level in ("actividad", "publico") and (leaks(anon) or ic.ids(anon)):
+            level = "privada"  # no se pudo sacar el nombre o el documento con seguridad: se oculta
         if level == "privada":
             o["particular"] = True
             if ADJ_PAT.search(body) and CHACRA_PAT.search(body):
@@ -190,8 +203,8 @@ def parse(text, numero, url):
                                      "lotes": max(1, len(set(LOTE_PAT.findall(body))))}
         elif level == "actividad":
             o["nivel"], o["text"] = level, anon
-        elif level == "publico":  # el buscador muestra el nombre; Instagram usa text_ig, sin nombres de personas
-            o["nivel"], o["text"], o["text_ig"] = level, strip_ids(body), anon
+        elif level == "publico":  # con nombre en el buscador, Instagram y el newsletter; sin documentos
+            o["nivel"], o["text"] = level, anon
         else:
             o["text"] = scrub(body)
         out.append(o)
@@ -247,7 +260,7 @@ def load(today, save=True):
 # ------------------------------------------------------------------ como notas de Prensa (mismo criterio de destacado)
 def as_note(o):
     """La ordenanza con la forma de una nota de Prensa, para usar prensa.themes, is_destacado, rank y las placas.
-    Es lo que llega a Instagram: de las de rol público, el texto sin nombres de personas (text_ig)."""
+    Es lo que llega a Instagram. text_ig: el texto sin nombres de las de rol público guardadas antes de STORE_VERSION 3."""
     text = o.get("text_ig") or o["text"]
     m = ARTICLE1_PAT.search(text)
     note = {"id": f"ord-{o['numero']}", "date": o["promulgada"], "link": o["url"],
@@ -314,4 +327,8 @@ def adjudicaciones(ords):
 def leaks(text):
     """Control final antes de publicar: un documento de identidad o un nombre de particular en el texto que sale."""
     return (bool(DNI_PAT.search(text)) or any(m.group(1) in PERSON_CUIT for m in CUIT_PAT.finditer(text))
-            or ic.anonymize(text) != text)
+            or ic.anonymize(text) != text or bool(RESTO_PAT.search(text)))
+
+
+# Apellido que sobrevivió a la anonimización: "un particular FIGUEROA", "una vecina BRITO DEL PINO".
+RESTO_PAT = re.compile(r"\b(?:particular(?:es)?|vecin[oa]s?|profesional)\s+[A-ZÁÉÍÓÚÑ]{3,}\b")
