@@ -3,12 +3,14 @@
 # cronograma del 79% del agua): por cada ordenanza del Boletín cuyo articulado cita un Anexo, se baja el PDF del Digesto,
 # se guarda el texto del Anexo y si el Boletín lo traía o no. Corre en el cron después de Instagram (que actualiza el
 # Boletín). Solo ordenanzas con texto público: las de particulares no se buscan. "capturado": cuándo se bajó; el
-# newsletter incluye el Anexo esa semana aunque el Boletín sea anterior.
+# newsletter incluye el Anexo esa semana aunque el Boletín sea anterior. En la primera corrida (store vacío) es la fecha
+# de publicación del Boletín, para que el newsletter no meta de golpe los Anexos de todo el histórico.
 #   python digesto.py
 import hashlib
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -38,6 +40,16 @@ def anexo_text(text):
     return boletin.scrub(text[m.start():]) if m else ""
 
 
+def capturado(primera, last_modified, now=None):
+    """ISO de "capturado": en la primera corrida, cuándo el Boletín subió el PDF (Last-Modified); si no, ahora."""
+    if primera and last_modified:
+        try:
+            return parsedate_to_datetime(last_modified).astimezone(ARG).isoformat(timespec="seconds")
+        except (TypeError, ValueError):
+            pass
+    return (now or datetime.now(ARG)).isoformat(timespec="seconds")
+
+
 def session():
     """Laravel: la búsqueda es un POST con el token CSRF de la portada y su cookie."""
     s = requests.Session()
@@ -65,7 +77,7 @@ def run():
     if not todo:
         print("Digesto: no hay ordenanzas nuevas que citen un Anexo.")
         return 0
-    s, boletines, changed = session(), {}, []
+    s, boletines, changed, primera = session(), {}, [], not store
     for o in sorted(todo, key=lambda o: o["numero"]):
         st = buscar(s, o["numero"])
         if not st:
@@ -77,11 +89,12 @@ def run():
         if o["url"] not in boletines:
             b = requests.get(o["url"], timeout=60)
             b.raise_for_status()
-            boletines[o["url"]] = boletin.pdf_text(b.content)
+            boletines[o["url"]] = (boletin.pdf_text(b.content), b.headers.get("Last-Modified"))
+        texto_boletin, publicado = boletines[o["url"]]
         rec = {"label": o["label"], "pdf": url, "sha256": hashlib.sha256(pdf.content).hexdigest(),
                "anexo": anexo_text(boletin.pdf_text(pdf.content)), "boletin": o["boletin"], "boletin_url": o["url"],
-               "anexo_en_boletin": anexo_en_boletin(boletines[o["url"]], o["numero"]),
-               "capturado": datetime.now(ARG).isoformat(timespec="seconds")}  # el newsletter lo cuenta esa semana
+               "anexo_en_boletin": anexo_en_boletin(texto_boletin, o["numero"]),
+               "capturado": capturado(primera, publicado)}  # el newsletter lo cuenta esa semana
         store[str(o["numero"])] = rec
         changed.append(o["label"])
         falta = "" if rec["anexo_en_boletin"] else " (no está en el Boletín Oficial)"

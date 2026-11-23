@@ -26,6 +26,14 @@ class AnexoTest(unittest.TestCase):
         self.assertIn("setenta y nueve por ciento (79 %)", a)
         self.assertEqual(digesto.anexo_text("ARTÍCULO 1º. Sin anexo."), "")
 
+    def test_capturado(self):
+        now = digesto.datetime(2026, 11, 23, 10, 0, tzinfo=digesto.ARG)
+        lm = "Wed, 05 Nov 2026 15:30:00 GMT"  # Boletín publicado el 5/11: no entra en el newsletter del 27/11
+        self.assertEqual(digesto.capturado(True, lm, now), "2026-11-05T12:30:00-03:00")
+        self.assertEqual(digesto.capturado(False, lm, now), "2026-11-23T10:00:00-03:00")
+        self.assertEqual(digesto.capturado(True, None, now), "2026-11-23T10:00:00-03:00")
+        self.assertEqual(digesto.capturado(True, "basura", now), "2026-11-23T10:00:00-03:00")
+
 
 if __name__ == "__main__":
     unittest.main()
