@@ -86,9 +86,10 @@ def _sentence(text, start, end):
     return text[a + 2 if a >= 0 else 0: b if b >= 0 else len(text)]
 
 
-def session_of(note):
+def session_of(note, approved_pat=APPROVED_PAT):
     """{key, number, kind, year, date} de la primera sesión que menciona una nota que confirma una aprobación, o None
-    (sin sesión, "tratará", "rechazó", Concejo Estudiantil, audiencias públicas, conflictos políticos)."""
+    (sin sesión, "tratará", "rechazó", Concejo Estudiantil, audiencias públicas, conflictos políticos).
+    approved_pat: el newsletter acepta más verbos ("designó") sin cambiar lo que publica Instagram."""
     if EXCLUDED_TITLE_PAT.search(note["title"]) or POLITICAL_TITLE_PAT.search(note["title"]):
         return None
     text = note["text"]
@@ -96,7 +97,7 @@ def session_of(note):
     if not m:
         return None
     sentence = _sentence(text, m.start(), m.end())
-    if not APPROVED_PAT.search(f"{note['title']}. {sentence}") or NOT_APPROVED_PAT.search(sentence):
+    if not approved_pat.search(f"{note['title']}. {sentence}") or NOT_APPROVED_PAT.search(sentence):
         return None
     number, kind = (m.group("n1"), m.group("k1")) if m.group("n1") else (m.group("n2"), m.group("k2"))
     kind = kind.capitalize()

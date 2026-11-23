@@ -78,26 +78,25 @@ def split_action(que_dice):
 PLATA_PUBLICA_PAT = re.compile(r"contrataci[oó]n(?:es)?\s+directas?|contr[aá]tase|compras?\s+directas?|locaci[oó]n\s+de\s+"
                                r"(?:obra|servicio)|honorario|reconoc\w*\s+(?:de\s+)?(?:la\s+)?deuda|leg[ií]timo\s+abono"
                                r"|ab[oó]nese|p[aá]guese|proveedor", re.I)
-# Excepción a una norma (habilitación, edificación, estacionamiento, alcohol, taxi, compraventa): con nombre.
+# Trato distinto al general: excepción a una norma (habilitación, edificación, estacionamiento, alcohol, taxi,
+# compraventa), condonación o exención particular. Con nombre, salvo motivo social (SOCIAL_PAT).
 # "\bexcepción\b": "con carácter excepcional" (p. ej. una sesión) no es un trato distinto a una persona.
-TRATO_PAT = re.compile(r"\bexcepci[oó]n(?:es)?\b|except[uú]a|\bex[ií]m|exenci|fuera\s+de\s+(?:la\s+)?norma", re.I)
-# Condonación o exención de tasas o derechos (TCI, cementerio…): sin nombre, salvo que el ítem dé un motivo no social.
-FISCAL_PAT = re.compile(r"cond[oó]n|(?:\bex[ií]m\w*|\bexenci[oó]n)[^;]{0,160}?(?:\bpago|\btasas?\b|\bderechos?\b|contribuci"
-                        r"|tribut|impuesto|\bcanon|\bTCI\b|deuda)", re.I)
-MOTIVO_PAT = re.compile(r"\bcedid[oa]s?\b|\bcesi[oó]n\b|acta\s+acuerdo|\bconvenio\b|\bpermuta|compensaci|\bexpropia"
-                        r"|error\s+(?:de\s+|en\s+la\s+)?(?:liquidaci|facturaci|administrativ)|doble\s+(?:imposici|cobro)"
-                        r"|utilidad\s+p[uú]blica|afectad[oa]s?\s+por\s+(?:la\s+)?obra", re.I)
+TRATO_PAT = re.compile(r"\bexcepci[oó]n(?:es)?\b|except[uú]a|\bex[ií]m|exenci|cond[oó]n|fuera\s+de\s+(?:la\s+)?norma", re.I)
 # Personas designadas en un cargo ("designó a los integrantes titulares", "desígnase director"); no cualquier "designa".
 CARGO_PAT = re.compile(r"(?:des[ií]gna(?:se|r)?|design[oó])\b[^;]{0,160}?\b(?:integrantes?|titular(?:es)?|suplentes?"
                        r"|miembros?|juez|jueza|director\w*|secretari\w*)|integrantes\s+de\s+la\s+(?:junta|comisi[oó]n)", re.I)
 # Ayuda social (también eximiciones y condonaciones a jubilados, pensionados o personas con discapacidad): sin nombre
 # aunque sea plata pública o un trato distinto. Régimen general: trámite común, sin nombre.
-SOCIAL_PAT = re.compile(r"subsidio|pensi[oó]n|\bbecas?\b|vulnerab|discapacid|jubilad", re.I)
+# Motivo social (jubilación, salud, vulnerabilidad): sin nombre aunque sea una excepción o una condonación.
+SOCIAL_PAT = re.compile(r"subsidio|pensi[oó]n|\bbecas?\b|vulnerab|discapacid|jubilad|jubilaci|razones\s+de\s+salud|"
+                        r"(?:problemas?|estado)\s+de\s+salud|enfermedad|tratamiento\s+m[eé]dico|oncol[oó]gic|"
+                        r"socioecon[oó]mic|situaci[oó]n\s+econ[oó]mica|carenciad|indigen", re.I)
 REGIMEN_GENERAL_PAT = re.compile(r"r[eé]gimen\s+general|plan\s+(?:general\s+)?de\s+(?:pagos|regularizaci)", re.I)
 PRIVACIDAD = ("Nombrá solo a funcionarios y concejales, a quien recibe plata pública (contrato directo, pago, compra) y a "
               "quien recibe una excepción a una norma (habilitación, edificación, estacionamiento, alcohol, taxi, "
-              "compraventa). A quien recibe una condonación o exención de tasas o derechos no lo nombres, salvo que el "
-              "texto dé un motivo no social; a quien hizo un trámite común tampoco (usá 'un vecino' o 'una vecina'). Nunca escribas "
+              "compraventa) o una condonación o exención particular de tasas o derechos, salvo que el texto dé un motivo "
+              "social (jubilación, salud, vulnerabilidad): ahí no lo nombres. A quien hizo un trámite común tampoco "
+              "(usá 'un vecino' o 'una vecina'). Nunca escribas "
               "DNI, CUIT, CUIL ni números de licencia, matrícula, partida, nomenclatura catastral o dominio.")
 # "DNI" sin borde de palabra adelante (también "particularDNI 12.345.678"); L.E. y L.C., con borde: son cortos
 DNI_PAT = re.compile(r"(?:D\.?\s*N\.?\s*I\.?|\b(?:L\.?E\.?|L\.?C\.?))\s*:?\s*(?:N[º°o]\.?\s*)?[A-Z]?[\d.,\s]{6,12}\d", re.I)
@@ -115,18 +114,15 @@ NUM_PAT = re.compile(r"(?P<lab>\b(?:licencias?(?:\s+(?:de\s+)?[a-záéíóú]+)?
 CATASTRO_PAT = re.compile(r"\b\d{2}-\s*(?:\d{2}|RR)-\s*\d{3}-\s*\d{4}(?:-\s*\d{4})?(?:/\d{4})?\b|\b\d{3}-\d{4}-\d{4}\b")
 
 
-def con_nombre(text, motivo=None):
-    """La oración (o el ítem) es de alguien que se nombra: plata pública, excepción a una norma o un cargo. No la
-    ayuda social. Una condonación o exención de tasas, solo con motivo no social (motivo: si el ítem entero lo da; por
-    defecto se busca en el mismo texto). Sobre una nota entera usá por_oracion: una contratación en una oración no
-    nombra al resto."""
+def con_nombre(text):
+    """La oración (o el ítem) es de alguien que se nombra: plata pública, un cargo o un trato distinto al general
+    (excepción, condonación, exención particular). No la ayuda social ni el motivo social. Sobre una nota entera usá
+    por_oracion: una contratación en una oración no nombra al resto."""
     text = text or ""
     if SOCIAL_PAT.search(text):
         return False
     if PLATA_PUBLICA_PAT.search(text) or CARGO_PAT.search(text):
         return True
-    if FISCAL_PAT.search(text):
-        return bool(MOTIVO_PAT.search(text) if motivo is None else motivo)
     return bool(TRATO_PAT.search(text) and not REGIMEN_GENERAL_PAT.search(text))
 
 
@@ -165,8 +161,7 @@ def por_oracion(text, sin_nombre):
     text = text or ""
     if SOCIAL_PAT.search(text):
         return sin_nombre(text)
-    motivo = bool(MOTIVO_PAT.search(text))  # el motivo de una condonación puede estar en otro artículo
-    return "".join(o if con_nombre(o, motivo) else sin_nombre(o) for o in oraciones(text))
+    return "".join(o if con_nombre(o) else sin_nombre(o) for o in oraciones(text))
 
 
 # Personas particulares -> "un vecino" / "una vecina". Concejales, funcionarios e instituciones quedan, y también quien

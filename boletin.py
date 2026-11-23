@@ -16,7 +16,8 @@ from hf_dataset_store import DATASET_REPO_ID, load_json, save_json
 
 BASE = "http://boletinoficial.sma.gob.ar"
 STORE_PATH = "boletin/boletines.json"
-STORE_VERSION = 3  # 2: tres niveles de privacidad; 3: con nombre plata pública y trato distinto (ic.con_nombre)
+STORE_VERSION = 4  # 2: tres niveles de privacidad; 3: con nombre plata pública y trato distinto (ic.con_nombre);
+# 4: condonaciones con nombre salvo motivo social
 RECHECK = 3  # los últimos boletines guardados se revisan por si los reemplazaron con el mismo nombre
 
 LINK_PAT = re.compile(r"""href=["'](https?://boletinoficial\.sma\.gob\.ar/wp-content/uploads/\d{4}/\d{2}/bom-(\d{3,4})[^"'/]*\.pdf)["']""", re.I)
@@ -91,6 +92,8 @@ PUBLICO_PAT = re.compile(r"contrataci[oó]n(?:es)?\s+directas?|contr[aá]tase|lo
                          r"|reconoc\w*\s+(?:de\s+)?(?:la\s+)?deuda|leg[ií]timo\s+abono|ab[oó]nese|p[aá]guese|proveedor"
                          r"|estudio\s+de\s+impacto|concesi[oó]n|integrantes\s+de\s+la\s+comisi[oó]n|comisi[oó]n\s+municipal", re.I)
 DOMICILIO_PAT = re.compile(r",?\s*(?:con\s+)?domicili\w*\s+(?:real\s+|legal\s+|fiscal\s+)?(?:en\s+)?[^,.;]{0,90}", re.I)
+# "ubicado en calle Los Pinos Nº 213" -> "ubicado en calle Los Pinos": la altura ubica la casa de quien se nombra
+ALTURA_PAT = re.compile(r"(?P<calle>\b(?:calle|av(?:enida|\.)|pasaje)\s+[^,.;\d]{2,40}?)\s*(?:N[º°o]\.?\s*)?\d{1,5}\b", re.I)
 _NAME = r"(?:[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ'’-]*\.?\s+){0,5}[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ'’-]+"
 _ART = r"(?P<art>\b(?:del|de la|al|a la|el|la)\s+)?"
 # Nombre seguido de su documento ("Juan PÉREZ, DNI …"; CUIT/CUIL de persona: 20, 23, 24, 27)
@@ -113,8 +116,9 @@ def _particular(m):
 
 
 def strip_ids(text):
-    """Sin documentos, números sueltos (licencia, dominio, partida) ni domicilio; los nombres quedan."""
-    text = re.sub(r"\s+", " ", DOMICILIO_PAT.sub("", ic.sin_ids(text)))
+    """Sin documentos, números sueltos (licencia, dominio, partida), domicilio ni altura de la calle; los nombres
+    quedan."""
+    text = re.sub(r"\s+", " ", ALTURA_PAT.sub(r"\g<calle>", DOMICILIO_PAT.sub("", ic.sin_ids(text))))
     return re.sub(r"\s*,(?:\s*,)+", ",", text).strip()  # "un particular, , para" -> "un particular, para"
 
 
@@ -136,8 +140,7 @@ def privacy_level(body):
     nombre: plata pública, excepción a una norma o un cargo (ic.con_nombre). Antes que nada, la ayuda social
     (subsidio, pensión, jubilados): nunca "publico". Va primero: leaks() no ve el nombre de quien se nombra."""
     # la oración que da la excepción o la plata nombra a la persona ("honorarios… a cargo de la parte interesada", no)
-    motivo = bool(ic.MOTIVO_PAT.search(body))
-    if not ic.SOCIAL_PAT.search(body) and any(ic.con_nombre(s, motivo) and _nombra(s) for s in ic.oraciones(body)):
+    if not ic.SOCIAL_PAT.search(body) and any(ic.con_nombre(s) and _nombra(s) for s in ic.oraciones(body)):
         return "publico"
     if not leaks(body):
         return None

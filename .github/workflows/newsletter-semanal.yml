@@ -1,0 +1,33 @@
+name: Newsletter semanal
+on:
+  schedule:
+    - cron: "0 12 * * 5"  # viernes 09:00 en Argentina (UTC-3)
+  workflow_dispatch:
+    inputs:
+      hasta:
+        description: "Último día de la semana (AAAA-MM-DD). Vacío = hoy"
+        required: false
+jobs:
+  borrador:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write  # el borrador queda en un Issue "newsletter-borrador"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+      # Si falla cualquier paso, el workflow termina en rojo y GitHub avisa por mail.
+      - name: Borrador del newsletter
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HASTA: ${{ inputs.hasta }}
+        run: |
+          python newsletter.py ${HASTA:+--hasta "$HASTA"}

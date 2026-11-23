@@ -45,10 +45,11 @@ class AnonimizarTest(unittest.TestCase):
     def test_criterio_con_nombre(self):
         con = ["AUTORÍZASE por vía de excepción al Sr. Pedro Prueba a continuar con el taxi",
                "EXÍMESE al Sr. Juan Prueba de contar con estacionamientos dentro del predio",  # excepción a una norma
-               "CONDÓNASE la deuda de TCI del lote cedido a la Municipalidad por el Sr. Juan Prueba",  # motivo no social
-               "la compra directa a la Sra. Rosa Prueba"]
-        sin = ["CONDÓNASE la deuda de la Sra. Ana Prueba",  # condonación de tasas sin motivo: sin nombre
+               "CONDÓNASE la deuda de TCI del lote cedido a la Municipalidad por el Sr. Juan Prueba",
+               "CONDÓNASE la deuda de la Sra. Ana Prueba",  # sin motivo en el texto: trato distinto, con nombre
                "EXÍMESE al Sr. Juan Prueba del pago de la tasa",
+               "la compra directa a la Sra. Rosa Prueba"]
+        sin = ["CONDÓNASE la deuda de la Sra. Ana Prueba por razones de salud",  # motivo social: sin nombre
                "EXÍMESE al Sr. Juan Prueba en el marco del régimen general de jubilados",
                "otórgase un subsidio por excepción a la Sra. Ana Prueba",
                "AUTORÍZASE la licencia comercial del Sr. Pedro Prueba para el rubro kiosco"]
@@ -104,6 +105,15 @@ class AnonimizarTest(unittest.TestCase):
         # lo social veta en todo el ítem, aunque esté en otro artículo
         self.assertNotIn("Prueba", ic.anonymize("ARTÍCULO 1º.- EXÍMESE al Sr. Juan Prueba de la tasa.- ARTÍCULO 2º.- "
                                                 "El beneficiario es jubilado."))
+
+    def test_excepcion_por_motivo_social_sin_nombre(self):
+        # una excepción a una norma va con nombre, salvo que el motivo sea social (salud, jubilación, vulnerabilidad)
+        for t in ("AUTORÍZASE, por vía de excepción, al Sr. Juan Prueba, por razones de salud, a continuar con el taxi",
+                  "EXCEPTÚASE a la Sra. Ana Prueba, en atención a su situación socioeconómica, del requisito de antigüedad",
+                  "AUTORÍZASE, por vía de excepción, al Sr. Juan Prueba, en trámite de jubilación, la transferencia"):
+            self.assertFalse(ic.con_nombre(t), t)
+            self.assertNotIn("Prueba", ic.anonymize(t))
+        self.assertTrue(ic.con_nombre("AUTORÍZASE, por vía de excepción, al Sr. Juan Prueba a continuar con el taxi"))
 
     def test_nunca_documentos_ni_numeros(self):
         t = ("vehículo dominio AA-350-PL, licencia comercial nº 1399, DNI 30.444.555, CUIT 30-71642628-5, "

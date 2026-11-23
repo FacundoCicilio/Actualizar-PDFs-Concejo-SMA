@@ -57,6 +57,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python instagram_publisher.py
+      # Después de Instagram, que actualiza el Boletín: busca en el Digesto los Anexos de las ordenanzas nuevas.
+      - name: Anexos del Digesto
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+        run: |
+          python digesto.py
       # GitHub desactiva los crons tras 60 días sin actividad en el repo; re-habilitarlo por API reinicia ese contador sin commits.
       - name: Keepalive
         if: always()

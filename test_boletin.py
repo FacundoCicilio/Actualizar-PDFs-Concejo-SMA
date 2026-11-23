@@ -234,17 +234,33 @@ class NivelesDePrivacidadTest(unittest.TestCase):
         self.assertNotIn("text", o)
 
     # Forma real de la 15.727/26 y la 15.757/26 (nombres y documentos ficticios).
-    def test_condonacion_sin_motivo_sin_nombre_15727(self):
-        o = self.parse_body(
-            "ARTÍCULO 1º.- CONDÓNASE la deuda y los intereses generados en concepto de “Tasa por Servicios y Contribución "
-            "al Inmueble- TCI” correspondiente al inmueble con nomenclatura catastral 15-20-052-7152-0008 del Barrio "
-            "Gobernadores Neuquinos, cuya titular es la Sra. Laura NOEXISTE, DNI 32.666.777.- ARTÍCULO 2º.- AUTORÍZASE al "
-            "Departamento Ejecutivo Municipal a efectuar la anulación del certificado de deuda N° 67249 a nombre de la Sra. "
-            "Laura NOEXISTE y al desistimiento de las acciones legales iniciadas.-")
+    def test_condonacion_sin_motivo_con_nombre_15727(self):
+        # una condonación sin motivo en el texto es un trato distinto al general: con nombre, sin documento ni catastro
+        cuerpo = ("ARTÍCULO 1º.- CONDÓNASE la deuda y los intereses generados en concepto de “Tasa por Servicios y "
+                  "Contribución al Inmueble- TCI” correspondiente al inmueble con nomenclatura catastral 15-20-052-7152-0008 "
+                  "del Barrio Gobernadores Neuquinos, cuya titular es la Sra. Laura NOEXISTE, DNI 32.666.777.- ARTÍCULO 2º.- "
+                  "AUTORÍZASE al Departamento Ejecutivo Municipal a efectuar la anulación del certificado de deuda N° 67249 a "
+                  "nombre de la Sra. Laura NOEXISTE y al desistimiento de las acciones legales iniciadas.-")
+        o = self.parse_body(cuerpo)
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Laura NOEXISTE", o["text"])
         guardado = json.dumps(o, ensure_ascii=False)
-        self.assertNotIn("NOEXISTE", guardado)
         self.assertNotIn("7152", guardado)
+        self.assertNotIn("32.666.777", guardado)
+        # con motivo social, sin nombre
+        o = self.parse_body(cuerpo.replace("Neuquinos,", "Neuquinos, en atención a su situación socioeconómica,"))
         self.assertNotEqual(o.get("nivel"), "publico")
+        self.assertNotIn("NOEXISTE", json.dumps(o, ensure_ascii=False))
+
+    def test_condonacion_con_nombre_sin_altura_15701(self):  # forma real de la 15.701/26, datos ficticios
+        o = self.parse_body(
+            "ARTÍCULO 1º.- CONDÓNASE el 75% de los intereses generados en concepto de deuda por Tasa de Contribución sobre "
+            "Inmueble (TCI) correspondiente al inmueble con nomenclatura catastral 15-21-090-8926-0016; ubicado en calle "
+            "Los Pinos Nº 999 Barrio El Arenal, cuya posesión se encuentra a nombre de la Sra. Ana María NOEXISTE.-")
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Ana María NOEXISTE", o["text"])
+        self.assertIn("calle Los Pinos Barrio El Arenal", o["text"])
+        self.assertNotIn("999", json.dumps(o, ensure_ascii=False))
 
     def test_excepcion_a_norma_con_nombre_15757(self):
         o = self.parse_body(
