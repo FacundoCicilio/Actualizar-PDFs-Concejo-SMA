@@ -80,7 +80,7 @@ Reglas, sin excepción:
 - "sesión realizada, sin lo aprobado publicado": la sesión ya se hizo. No digas qué va a tratar ni qué aprobó. Escribí exactamente la oración del campo "texto" con el link al orden del día.
 - "sesión realizada, resultado publicado en parte": debajo de "Qué se aprobó" de esa sesión escribí exactamente la oración del campo "texto", en negrita, con el link al orden del día. Después, los "punto del orden del día de una sesión realizada, sin resultado publicado": cada uno en una viñeta con su expediente ("expte. 1926/2026"), contando qué se proponía, sin decir que se aprobó ni que se va a tratar.
 - El título es lo más relevante que el Concejo decidió en la sesión de esta semana (lo "aprobado" de esa sesión). Nunca las ordenanzas del Boletín Oficial ni un orden del día, si hubo una sesión con lo aprobado publicado.
-- Ordenanzas del Boletín: agrupadas por tema en 3 o 4 viñetas como máximo (por ejemplo tarifas y servicios, obras y convenios, excepciones y condonaciones, subsidios y otras), cada una de 60 palabras como máximo con el link al Boletín. Nombrá por su número solo las más relevantes. Las excepciones y condonaciones van con el nombre de cada beneficiario tal como está en el documento y el número de la ordenanza, sin detalles (por ejemplo: "condonación de tasas a Juan Ejemplo (15.000/26); excepción de taxi a Ana Muestra (15.001/26)"). El Anexo del Digesto va en la viñeta de su ordenanza, con los porcentajes con "%" y el total como en el documento (esa viñeta no tiene tope de palabras). La cantidad de ordenanzas te la doy yo: no las cuentes vos.
+- Ordenanzas del Boletín: agrupadas por tema en 3 o 4 viñetas como máximo (por ejemplo tarifas y servicios, obras y convenios, excepciones y condonaciones, subsidios y otras), cada una de 60 palabras como máximo con el link al Boletín. Nombrá por su número solo las más relevantes. Las excepciones y condonaciones van con el nombre de cada beneficiario tal como está en el documento y el número de la ordenanza, sin detalles (por ejemplo: "condonación de tasas a Juan Ejemplo (15.000/26); excepción de taxi a Ana Muestra (15.001/26)"); esa viñeta no tiene tope de palabras. El Anexo del Digesto va en la viñeta de su ordenanza, con los porcentajes con "%" y el total como en el documento (esa viñeta no tiene tope de palabras). La cantidad de ordenanzas te la doy yo: no las cuentes vos.
 - Si un documento trae el campo "con_nombre" (designados en un cargo, beneficiarios de una excepción o una condonación), escribí todos esos nombres tal cual, junto a su ordenanza o su tema. Es obligatorio aunque la viñeta sea corta.
 - Nada de comentarios sobre el propio newsletter, sobre números anteriores ni sobre cuándo se publicó algo ("estaba pendiente", "como dijimos", "ya contamos", "también incluimos"): contá solo lo que dicen los documentos.
 - Ningún número (cantidades, montos, porcentajes, fechas) que no esté escrito en los documentos o en este mensaje: no sumes, no cuentes, no redondees.
@@ -339,7 +339,7 @@ def conteos(material):
 def problems(draft, material, held=(), contexto=""):
     """Lo que hace inservible un borrador: tablas, links que no vienen del material, documentos que faltan, números que
     no están en los documentos, un título que no sale de lo aprobado en la sesión de la semana (held), la sección del
-    Boletín sin agrupar, documentos o números de una persona, declaraciones de interés o aniversarios, ítems de relleno,
+    Boletín sin agrupar, documentos o números de una persona, declaraciones de interés o aniversarios,
     o una sesión ya realizada contada como por venir. contexto: el resto del mensaje a Haiku (fechas de la semana)."""
     given = {unquote(m["url"]) for m in material}
     used = {unquote(u.rstrip(".,;:")) for u in URL_PAT.findall(draft)}
@@ -375,12 +375,6 @@ def problems(draft, material, held=(), contexto=""):
         vinetas = re.findall(r"^\s*-\s.*$", s.group("s"), re.M)
         if len(vinetas) > MAX_BOLETIN:
             out.append(f"la sección del Boletín tiene {len(vinetas)} viñetas: agrupá las ordenanzas por tema en 3 o 4")
-        anexos = [unquote(m["url"]) for m in material if m.get("tipo", "").startswith("Anexo")]
-        for v in vinetas:
-            palabras = len(re.sub(r"\]\([^)]*\)", "]", v).split()) - 1  # sin el guion ni las URLs
-            if palabras > MAX_PALABRAS and not any(a in unquote(v) for a in anexos):  # el Anexo no se recorta
-                out.append(f"la viñeta del Boletín \"{v.strip()[:60]}…\" tiene {palabras} palabras: máximo {MAX_PALABRAS}. "
-                           "Sacá montos, fechas y detalles, o pasá ordenanzas a otra viñeta; los nombres quedan")
     for line in draft.splitlines():
         if AUTOCOMENTARIO_PAT.search(line):
             out.append(f"\"{line.strip()[:80]}\" comenta el propio newsletter: contá solo lo que dicen los documentos")
@@ -406,9 +400,6 @@ def problems(draft, material, held=(), contexto=""):
         tema = (m.group("b") or m.group("c") or "").strip()
         if excluded(tema) or excluded(m.group("t")):  # "**Parque Cervecero**: autoriza ... y lo declaró de interés" va
             out.append(f"el ítem \"{tema}\" es una declaración de interés o un aniversario: sacalo")
-    for line in draft.splitlines():  # en viñetas y en párrafos
-        if RELLENO_PAT.search(line):
-            out.append(f"\"{line.strip()[:80]}\" remite a otro ítem: contá qué dice o sacalo")
     for m in material:
         if m.get("tipo", "").startswith("sesión realizada") and m["texto"] not in draft:
             out.append(f"falta, tal cual, la oración \"{m['texto']}\" con el link al orden del día")
@@ -421,6 +412,23 @@ def problems(draft, material, held=(), contexto=""):
     return out
 
 
+def blandas(draft, material):
+    """Lo que conviene corregir pero no frena el borrador (sale con aviso): viñetas largas del Boletín y relleno. No
+    tienen tope la viñeta del Anexo ni la de excepciones y condonaciones (lleva todos los nombres)."""
+    out = []
+    anexos = [unquote(m["url"]) for m in material if m.get("tipo", "").startswith("Anexo")]
+    for s in BOLETIN_SEC_PAT.finditer(draft):
+        for v in re.findall(r"^\s*-\s.*$", s.group("s"), re.M):
+            palabras = len(re.sub(r"\]\([^)]*\)", "]", v).split()) - 1  # sin el guion ni las URLs
+            if palabras > MAX_PALABRAS and not any(a in unquote(v) for a in anexos) and not ic.TRATO_PAT.search(v):
+                out.append(f"la viñeta del Boletín \"{v.strip()[:60]}…\" tiene {palabras} palabras: máximo {MAX_PALABRAS}. "
+                           "Sacá montos, fechas y detalles, o pasá ordenanzas a otra viñeta; los nombres quedan")
+    for line in draft.splitlines():  # en viñetas y en párrafos
+        if RELLENO_PAT.search(line):
+            out.append(f"\"{line.strip()[:80]}\" remite a otro ítem: contá qué dice o sacalo")
+    return out
+
+
 def redactar(desde, hasta, held, material, previos):
     client = anthropic.Anthropic(api_key=ic.api_key(), timeout=180.0, max_retries=2)
     prev = "\n\n".join(f"=== {t} ===\n{b}" for t, b in previos) or "(no hay newsletters anteriores)"
@@ -429,17 +437,22 @@ def redactar(desde, hasta, held, material, previos):
                 + "".join(f"Ordenanzas del Boletín Oficial N° {b} en estos documentos: {n}.\n" for b, n in conteos(material).items()))
     prompt = (contexto + f"\nNewsletters anteriores (para no repetir y contar qué hay de nuevo):\n{prev}\n\n"
               f"Documentos oficiales de esta semana:\n{json.dumps(material, ensure_ascii=False, indent=1)}")
-    messages = [{"role": "user", "content": prompt}]
+    messages, usable = [{"role": "user", "content": prompt}], None
     for _ in range(4):  # tres reintentos, diciéndole qué estuvo mal (a veces la primera respuesta viene vacía)
         # effort bajo, como el resto del repo: con el default el razonamiento se come max_tokens y el texto sale vacío
         resp = client.messages.create(model=ic.CRIOLLO_MODEL, max_tokens=16000, system=SYSTEM, messages=messages,
                                       output_config={"effort": "low"})
         draft = "".join(b.text for b in resp.content if b.type == "text").strip()
         bad = problems(draft, material, held, contexto) + ([f"respuesta cortada ({resp.stop_reason})"] if resp.stop_reason != "end_turn" else [])
+        soft = blandas(draft, material)
         if not bad:
-            return draft
+            usable = (draft, soft)  # el último sin reglas duras rotas
+            if not soft:
+                return usable
         messages += [{"role": "assistant", "content": draft},
-                     {"role": "user", "content": "Corregí esto y devolvé el newsletter completo:\n- " + "\n- ".join(bad)}]
+                     {"role": "user", "content": "Corregí esto y devolvé el newsletter completo:\n- " + "\n- ".join(bad + soft)}]
+    if usable:
+        return usable
     raise RuntimeError("El borrador no cumple las reglas después de los reintentos:\n- " + "\n- ".join(bad))
 
 
@@ -456,7 +469,8 @@ def main():
         body = (f"No hubo sesión del Concejo entre el {desde:%d/%m/%Y} y el {a.hasta:%d/%m/%Y} ni documentos oficiales "
                 "nuevos. Esta semana no hay borrador: no se inventa contenido.")
     else:
-        body = redactar(desde, a.hasta, held, material, anteriores(desde, avisos))
+        body, soft = redactar(desde, a.hasta, held, material, anteriores(desde, avisos))
+        avisos += [f"Revisar a mano: {x}." for x in soft]
         body += ("\n\n---\n\n<sub>Borrador generado con Claude Haiku a partir de " f"{len(material)} documentos oficiales. "
                  "Copiá desde el título hasta la firma; esta línea no va.</sub>")
     if avisos:  # debajo del "---": no se copia al newsletter

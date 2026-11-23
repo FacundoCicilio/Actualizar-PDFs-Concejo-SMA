@@ -1,5 +1,7 @@
 import unittest
 from datetime import date
+from types import SimpleNamespace
+from unittest import mock
 
 import newsletter as nl
 
@@ -107,9 +109,9 @@ class TestReglas(unittest.TestCase):
         mat = [{"url": "https://p/1"}]
         for relleno in ("- **Anexo**: ver el ítem de arriba.", "- **Anexo I**: ver el bloque del agua.",
                         "Sobre el Anexo, véase la sección anterior.", "- **Tarifa**: ídem."):
-            p = nl.problems("- **Agua**: sube. [F](https://p/1)\n" + relleno, mat)
+            p = nl.blandas("- **Agua**: sube. [F](https://p/1)\n" + relleno, mat)
             self.assertTrue(any("remite a otro" in x for x in p), relleno)
-        self.assertEqual(nl.problems("- **Agua**: ver la tarifa nueva en el link. [F](https://p/1)", mat), [])
+        self.assertEqual(nl.blandas("- **Agua**: ver la tarifa nueva en el link. [F](https://p/1)", mat), [])
 
     def test_numeros_solo_de_los_documentos(self):
         mat = [{"url": "https://p/1", "texto": "Actualización del 79 % en diez tramos desde el 1 de diciembre de 2026."}]
@@ -160,9 +162,12 @@ class TestReglas(unittest.TestCase):
         self.assertTrue(any("agrupá" in x for x in nl.problems(sec + "- **Tema e**: x.\n", mat)))
         # 60 = "**Tema d**:" (2) + 56 + "fin." + "[BO](url)"
         larga = sec.replace("- **Tema d**: x.", "- **Tema d**: " + "palabra " * 56 + "fin.")
-        self.assertEqual(nl.problems(larga, mat), [])
-        p = nl.problems(larga.replace("fin.", "fin otra."), mat)
+        self.assertEqual(nl.blandas(larga, mat), [])
+        p = nl.blandas(larga.replace("fin.", "fin otra."), mat)
         self.assertTrue(any("tiene 61 palabras" in x for x in p), p)
+        self.assertEqual(nl.problems(larga.replace("fin.", "fin otra."), mat), [])  # el largo solo avisa
+        # excepciones y condonaciones: van todos los nombres, sin tope
+        self.assertEqual(nl.blandas(larga.replace("fin.", "fin otra condonación."), mat), [])
 
     def test_sin_resultado(self):
         doc = {"items": [
@@ -196,9 +201,28 @@ class TestReglas(unittest.TestCase):
                 "texto": "Actualización total del setenta y nueve por ciento (79 %) en diez tramos: 20 % en octubre."}]
         larga = ("## Ordenanzas publicadas en el Boletín Oficial\n- **Agua**: la 15.816/26 actualiza la tarifa un 79 % en "
                  "diez tramos, 20 % en octubre" + " y sigue" * 30 + f". [BO]({bo}) · [Anexo]({dig})\n")
-        self.assertEqual(nl.problems(larga, mat), [])  # más de 60 palabras: el Anexo no se recorta
+        self.assertEqual(nl.problems(larga, mat), [])
+        self.assertEqual(nl.blandas(larga, mat), [])  # más de 60 palabras: el Anexo no se recorta
         p = nl.problems(larga.replace("79 %", "79 puntos"), mat)
         self.assertTrue(any("total del 79 %" in x for x in p), p)
+
+    def test_redactar_sale_con_blandas(self):
+        relleno, ok = "- **Tarifa**: ídem. [F](https://p/1)", "- **Agua**: sube. [F](https://p/1)"
+        sem, mat = (date(2026, 11, 14), date(2026, 11, 20)), [{"url": "https://p/1"}]
+        respuestas = iter([])
+        msg = lambda t: SimpleNamespace(content=[SimpleNamespace(type="text", text=t)], stop_reason="end_turn")
+        cliente = SimpleNamespace(messages=SimpleNamespace(create=lambda **k: msg(next(respuestas))))
+        with mock.patch.object(nl.anthropic, "Anthropic", return_value=cliente), \
+                mock.patch.object(nl.ic, "api_key", return_value="k"):
+            respuestas = iter(["| a | b |\n|---|---|", relleno, relleno, relleno])  # una dura y después solo blandas
+            draft, soft = nl.redactar(*sem, [], mat, [])
+            self.assertEqual(draft, relleno)
+            self.assertTrue(any("remite a otro" in x for x in soft))
+            respuestas = iter(["| a | b |\n|---|---|"] * 4)
+            with self.assertRaises(RuntimeError):  # dura hasta el final: no hay borrador
+                nl.redactar(*sem, [], mat, [])
+            respuestas = iter([ok])
+            self.assertEqual(nl.redactar(*sem, [], mat, []), (ok, []))
 
 
 if __name__ == "__main__":
