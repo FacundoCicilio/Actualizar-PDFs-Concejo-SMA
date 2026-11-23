@@ -52,6 +52,15 @@ class TestReglas(unittest.TestCase):
         self.assertIn("79%", got[0][2])
         self.assertEqual(nl.archivados(date(2026, 11, 13)), [])  # solo los anteriores a la semana
 
+    def test_anteriores_sin_issues_archivados(self):
+        issues = [{"title": "Newsletter · semana del 14/11 al 20/11/2026", "body": "# Borrador de la 28\ntexto"},
+                  {"title": "Newsletter · semana del 21/11 al 27/11/2026", "body": "# Borrador de la 29\ntexto"}]
+        with mock.patch.object(nl.ip, "gh", return_value=issues):
+            titulos = [t for t, _ in nl.anteriores(date(2026, 12, 5), [])]
+        self.assertIn("Newsletter · semana del 21/11 al 27/11/2026", titulos)  # sin archivo: va el Issue
+        self.assertNotIn("Newsletter · semana del 14/11 al 20/11/2026", titulos)  # publicado el 23/11: va el archivo
+        self.assertTrue(any(t.startswith("El Concejo designó") for t in titulos), titulos)
+
     def test_auxiliar(self):
         avisos = []
         self.assertEqual(nl.auxiliar("x", lambda: 1, 0, avisos), 1)

@@ -320,13 +320,16 @@ def archivados(desde, carpeta=NEWSLETTERS_DIR):
 
 def anteriores(desde, avisos):
     """Newsletters anteriores a la semana, del más nuevo al más viejo: [(título, texto)]. Los archivados en newsletters/
-    y los borradores de los Issues "newsletter-borrador" (sin los "no hay borrador")."""
+    y los borradores de los Issues "newsletter-borrador" (sin los "no hay borrador" ni los ya archivados)."""
     out = archivados(desde)
+    publicados = [d for d, _, _ in out]
     for i in auxiliar("los Issues de newsletters anteriores", lambda: ip.gh(
             "GET", "/issues", params={"labels": LABEL[0], "state": "all", "per_page": 50}), [], avisos):
         m = re.search(r"al (\d{2}/\d{2}/\d{4})", i["title"])
         fin = m and datetime.strptime(m.group(1), "%d/%m/%Y").date()
-        if fin and fin < desde and (i["body"] or "").startswith("#"):
+        # el borrador de la semana que termina en fin se publica en los 7 días siguientes: si está archivado, va ese
+        archivado = fin and any(fin <= d < fin + timedelta(days=7) for d in publicados)
+        if fin and fin < desde and not archivado and (i["body"] or "").startswith("#"):
             out.append((fin, i["title"], (i["body"] or "").split("\n---\n")[0].strip()))
     return [(t, b) for _, t, b in sorted(out, key=lambda x: x[0], reverse=True)[:PREVIOS]]
 
