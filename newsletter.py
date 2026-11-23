@@ -3,18 +3,20 @@
 # Una sesión que ya se realizó va en "Qué se aprobó" si Prensa publicó lo aprobado; si no, se dice que todavía no lo
 # publicó, con el link al orden del día. Si publicó solo una parte, cuántos puntos quedan sin resultado y los de alcance
 # general, con su expediente. Solo las sesiones por venir van en "Qué va a tratar". Claude Haiku lo redacta
-# leyendo también los newsletters anteriores (Issues "newsletter-borrador" y el feed de Substack), para contar qué hay
+# leyendo también los newsletters anteriores (Issues "newsletter-borrador" y newsletters/*.md), para contar qué hay
 # de nuevo en un tema
-# que ya salió. Los Anexos del Digesto entran la semana en que se capturan. Queda en un Issue en markdown sin tablas. Cualquier error termina con código 1.
+# que ya salió. Los Anexos del Digesto entran la semana en que se capturan. Queda en un Issue en markdown sin tablas. Si falla una fuente
+# auxiliar (newsletters anteriores, Digesto) el borrador sale igual con un aviso en el Issue; termina con código 1 solo si
+# no se puede generar el borrador.
 #   python newsletter.py [--hasta 2026-11-20] [--sin-issue]
 import argparse
 import json
 import re
 import sys
-import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.parse import unquote
 
 import anthropic
@@ -40,7 +42,7 @@ EXCLUIR_PAT = re.compile(r"declar\w*\s+de\s+inter[eé]s|de\s+inter[eé]s\s+(?:mu
 DECISION_PAT = re.compile(r"autoriz|aprob|modific|otorg|establec|ratific|exim|derog|adjudic|convoc|cre[óa]|design", re.I)
 # Verbos de una nota de Prensa que confirman que el Concejo decidió: los de Instagram más designaciones y derogaciones.
 DECIDIO_PAT = re.compile(prensa.APPROVED_PAT.pattern + r"|\b(?:design[oó]|eligi[oó]|derog[oó]|modific[oó]|cre[oó])\b", re.I)
-SUBSTACK_FEED = "https://facucicilio.substack.com/feed"  # los números publicados (el #1 no pasó por un Issue)
+NEWSLETTERS_DIR = "newsletters"  # los números que no pasaron por un Issue (el #1); el feed de Substack da 403 en Actions
 # Una viñeta del borrador: "- **Tema**: texto". El tema va en negrita o hasta los dos puntos.
 ITEM_PAT = re.compile(r"^\s*-\s+(?:\*\*(?P<b>[^*]+)\*\*|(?P<c>[^:\n]+)):?(?P<t>[^\n]*)", re.M)
 TABLE_PAT = re.compile(r"^\s*\|.*\|\s*$", re.M)
@@ -227,13 +229,23 @@ def sin_resultado(doc, notas, ses, url):
     return out
 
 
-def collect(desde, hasta):
+def auxiliar(nombre, fn, default, avisos):
+    """fn() o default si falla: una fuente auxiliar caída no frena el borrador, queda como aviso en el Issue."""
+    try:
+        return fn()
+    except Exception as e:  # cualquier falla de red, de HF o de formato
+        avisos.append(f"No se pudo leer {nombre} ({type(e).__name__}: {e}).")
+        print(f"Aviso: {avisos[-1]}")
+        return default
+
+
+def collect(desde, hasta, avisos):
     """(sesiones de la semana, material): material = [{tipo, sesion, titulo, texto, url}] desde documentos oficiales."""
     index = {r["doc_id"]: r for r in load_index(DATASET_REPO_ID) if r.get("doc_id")}
     notes = prensa.load_notes(save=False)  # el sitio de Prensa, no solo lo guardado: lo que se publicó hasta hoy
     # con el criterio de privacidad vigente aunque el cron todavía no haya rehecho el store (STORE_VERSION)
     ords = boletin.load(hasta, save=False)["ordenanzas"]
-    anexos = load_json(DATASET_REPO_ID, digesto.STORE_PATH) or {}
+    anexos = auxiliar("los Anexos del Digesto", lambda: load_json(DATASET_REPO_ID, digesto.STORE_PATH), None, avisos) or {}
     material, held, usadas = [], [], set()
     for c, estado, notas in sesiones(index, notes, desde, hasta):
         ses = ses_label(c["doc"])
@@ -295,23 +307,23 @@ def collect(desde, hasta):
     return held, unique
 
 
-def substack(feed_xml):
-    """[(fecha, título, texto)] de los números publicados en Substack (RSS)."""
+def archivados(desde, carpeta=NEWSLETTERS_DIR):
+    """[(fecha, título, texto)] de newsletters/AAAA-MM-DD.md anteriores a desde: "# título" y el texto."""
     out = []
-    for it in ET.fromstring(feed_xml).iter("item"):
-        html_body = it.findtext("{http://purl.org/rss/1.0/modules/content/}encoded") or it.findtext("description") or ""
-        out.append((parsedate_to_datetime(it.findtext("pubDate")).astimezone(ARG).date(), it.findtext("title") or "",
-                    prensa.plain(html_body)))
+    for f in sorted(Path(carpeta).glob("*.md")):
+        d = date.fromisoformat(f.stem)
+        if d < desde:
+            titulo, _, texto = f.read_text(encoding="utf-8").partition("\n")
+            out.append((d, f"{titulo.lstrip('# ').strip()} (publicado en Substack el {d:%d/%m/%Y})", texto.strip()))
     return out
 
 
-def anteriores(desde):
-    """Newsletters anteriores a la semana, del más nuevo al más viejo: [(título, texto)]. Los publicados en Substack y
-    los borradores de los Issues "newsletter-borrador" (sin los "no hay borrador")."""
-    r = requests.get(SUBSTACK_FEED, timeout=30)
-    r.raise_for_status()
-    out = [(d, f"{t} (publicado en Substack el {d:%d/%m/%Y})", b) for d, t, b in substack(r.content) if d < desde]
-    for i in ip.gh("GET", "/issues", params={"labels": LABEL[0], "state": "all", "per_page": 50}):
+def anteriores(desde, avisos):
+    """Newsletters anteriores a la semana, del más nuevo al más viejo: [(título, texto)]. Los archivados en newsletters/
+    y los borradores de los Issues "newsletter-borrador" (sin los "no hay borrador")."""
+    out = archivados(desde)
+    for i in auxiliar("los Issues de newsletters anteriores", lambda: ip.gh(
+            "GET", "/issues", params={"labels": LABEL[0], "state": "all", "per_page": 50}), [], avisos):
         m = re.search(r"al (\d{2}/\d{2}/\d{4})", i["title"])
         fin = m and datetime.strptime(m.group(1), "%d/%m/%Y").date()
         if fin and fin < desde and (i["body"] or "").startswith("#"):
@@ -437,15 +449,18 @@ def main():
     ap.add_argument("--sin-issue", action="store_true", help="imprime el borrador en lugar de abrir el Issue")
     a = ap.parse_args()
     desde = a.hasta - timedelta(days=6)
-    held, material = collect(desde, a.hasta)
+    avisos = []
+    held, material = collect(desde, a.hasta, avisos)
     title = f"Newsletter · semana del {desde:%d/%m} al {a.hasta:%d/%m/%Y}"
     if not held and not material:
         body = (f"No hubo sesión del Concejo entre el {desde:%d/%m/%Y} y el {a.hasta:%d/%m/%Y} ni documentos oficiales "
                 "nuevos. Esta semana no hay borrador: no se inventa contenido.")
     else:
-        body = redactar(desde, a.hasta, held, material, anteriores(desde))
+        body = redactar(desde, a.hasta, held, material, anteriores(desde, avisos))
         body += ("\n\n---\n\n<sub>Borrador generado con Claude Haiku a partir de " f"{len(material)} documentos oficiales. "
                  "Copiá desde el título hasta la firma; esta línea no va.</sub>")
+    if avisos:  # debajo del "---": no se copia al newsletter
+        body += "\n\n" + "\n".join(f"> ⚠️ {x}" for x in avisos)
     if a.sin_issue:
         print(f"{title}\n\n{body}")
         return 0

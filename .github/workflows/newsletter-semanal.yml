@@ -21,7 +21,8 @@ jobs:
       - name: Install deps
         run: |
           pip install -r requirements.txt
-      # Si falla cualquier paso, el workflow termina en rojo y GitHub avisa por mail.
+      # Termina en rojo (y GitHub avisa por mail) solo si no se puede generar el borrador; si falla una fuente
+      # auxiliar (newsletters anteriores, Digesto) el Issue sale igual con un aviso.
       - name: Borrador del newsletter
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

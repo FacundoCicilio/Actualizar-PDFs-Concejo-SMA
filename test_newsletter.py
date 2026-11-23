@@ -43,11 +43,19 @@ class TestReglas(unittest.TestCase):
         self.assertTrue(nl.en_rango(datetime(2026, 11, 20, 23, 0, tzinfo=nl.ARG), desde, hasta))
         self.assertFalse(nl.en_rango(None, desde, hasta))
 
-    def test_substack(self):
-        xml = (b'<?xml version="1.0"?><rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>'
-               b'<title>El agua sube 79%</title><pubDate>Fri, 13 Nov 2026 12:00:00 GMT</pubDate>'
-               b'<content:encoded><![CDATA[<p>La <b>tarifa</b> del agua.</p>]]></content:encoded></item></channel></rss>')
-        self.assertEqual(nl.substack(xml), [(date(2026, 11, 13), "El agua sube 79%", "La tarifa del agua.")])
+    def test_archivados(self):
+        got = nl.archivados(date(2026, 11, 21))  # el #1 guardado en el repo
+        self.assertEqual(got[0][0], date(2026, 11, 13))
+        self.assertTrue(got[0][1].startswith("El agua sube 79%"))
+        self.assertIn("79%", got[0][2])
+        self.assertEqual(nl.archivados(date(2026, 11, 13)), [])  # solo los anteriores a la semana
+
+    def test_auxiliar(self):
+        avisos = []
+        self.assertEqual(nl.auxiliar("x", lambda: 1, 0, avisos), 1)
+        self.assertEqual(nl.auxiliar("el Digesto", lambda: 1 / 0, {}, avisos), {})
+        self.assertEqual(len(avisos), 1)
+        self.assertIn("el Digesto", avisos[0])
 
     def test_problemas_interes_e_ids(self):
         mat = [{"url": "https://p/1"}]
