@@ -228,13 +228,63 @@ class NivelesDePrivacidadTest(unittest.TestCase):
             self.assertNotIn(dato, json.dumps(o, ensure_ascii=False))
         self.assertIn("licencia comercial", o["text"])
 
-    def test_condonacion_con_nombre_subsidio_sin(self):
-        o = self.parse_body("ARTÍCULO 1º.- CONDÓNASE la deuda de la Sra. Laura NOEXISTE, DNI 32.666.777, por tasas.-")
-        self.assertEqual(o.get("nivel"), "publico")
-        self.assertIn("Laura NOEXISTE", o["text"])
+    def test_subsidio_sin_nombre(self):
         o = self.parse_body("ARTÍCULO 1º.- OTÓRGASE un subsidio a la Sra. Laura NOEXISTE, DNI 32.666.777.-")
         self.assertTrue(o["particular"])
         self.assertNotIn("text", o)
+
+    # Forma real de la 15.727/26 y la 15.757/26 (nombres y documentos ficticios).
+    def test_condonacion_sin_motivo_sin_nombre_15727(self):
+        o = self.parse_body(
+            "ARTÍCULO 1º.- CONDÓNASE la deuda y los intereses generados en concepto de “Tasa por Servicios y Contribución "
+            "al Inmueble- TCI” correspondiente al inmueble con nomenclatura catastral 15-20-052-7152-0008 del Barrio "
+            "Gobernadores Neuquinos, cuya titular es la Sra. Laura NOEXISTE, DNI 32.666.777.- ARTÍCULO 2º.- AUTORÍZASE al "
+            "Departamento Ejecutivo Municipal a efectuar la anulación del certificado de deuda N° 67249 a nombre de la Sra. "
+            "Laura NOEXISTE y al desistimiento de las acciones legales iniciadas.-")
+        guardado = json.dumps(o, ensure_ascii=False)
+        self.assertNotIn("NOEXISTE", guardado)
+        self.assertNotIn("7152", guardado)
+        self.assertNotEqual(o.get("nivel"), "publico")
+
+    def test_excepcion_a_norma_con_nombre_15757(self):
+        o = self.parse_body(
+            "ARTÍCULO 1º.- AUTORÍZASE, por vía de excepción a la cláusula novena del Boleto de Compraventa, a la Sra. "
+            "Mercedes FICTICIA, DNI 32.666.777, a transferir los derechos y posición contractual del Lote 155 del Barrio "
+            "Julio Obeid, mediante la cesión a título oneroso o mediante operación de intercambio habitacional; en razón de "
+            "haber solicitado la autorización para la venta o permuta del lote 155 que le fuera adjudicado.-")
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Mercedes FICTICIA", o["text"])
+        self.assertNotIn("32.666.777", json.dumps(o, ensure_ascii=False))
+
+    def test_excepcion_sin_documento_es_publico(self):  # 15.745: antes quedaba como "sin personas"
+        o = self.parse_body("ARTÍCULO 1º.- AUTORÍZASE al Sr. Augusto FICTICIO, por vía de excepción a la Ordenanza N° "
+                            "3837/00, la venta de alcohol en el evento.-")
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Augusto FICTICIO", o["text"])
+
+    def test_nombre_sin_titulo_en_tramite_comun(self):  # 15.711 y 15.789
+        o = self.parse_body("ARTÍCULO 1º.- AUTORÍZASE un FOS de 0,5 para el inmueble del Lote F1-b de Chacra 32, "
+                            "propiedad de los Sres. Emir PRUEBA y Juan Manuel FALSO.-")
+        self.assertNotIn("PRUEBA", json.dumps(o, ensure_ascii=False))
+        self.assertNotIn("FALSO", json.dumps(o, ensure_ascii=False))
+
+    def test_excepcion_con_punto_y_coma_15711(self):  # el ";" no separa a los dueños de la excepción
+        o = self.parse_body("ARTÍCULO 1º.- AUTORÍZASE, por vía de excepción a la Ordenanza 3012/98, una Superación de Factor "
+                            "de Ocupación del Suelo de 1.99%, para el inmueble del Lote F1-b de Chacra 32, nomenclatura "
+                            "catastral 15-21-094-4126-0000; propiedad de los Sres. Emir PRUEBA y Juan Manuel FALSO.-")
+        self.assertEqual(o.get("nivel"), "publico")
+        self.assertIn("Emir PRUEBA", o["text"])
+        self.assertNotIn("4126", o["text"])
+
+    def test_empresa_no_es_persona_15795(self):
+        o = self.parse_body("ARTÍCULO 1º.- AUTORÍZASE el uso de “Vivienda Multifamiliar” para el Lote 15, Manzana L, "
+                            "nomenclatura catastral 15-21-049-8824-0000, propiedad de ALNIPE S.A.-")
+        self.assertNotIn("particular", o)
+        self.assertIn("ALNIPE S.A", o["text"])
+
+    def test_a_favor_de_la_municipalidad_no_es_persona(self):
+        self.assertFalse(boletin._nombra("hasta la inscripción de la titularidad a favor de la Municipalidad de San "
+                                         "Martín de los Andes en el Registro."))
 
     def parse_body(self, body):
         [o] = boletin.parse(self.HEAD + body + self.FIN, 827, "u")

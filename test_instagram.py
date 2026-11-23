@@ -44,10 +44,12 @@ class AnonimizarTest(unittest.TestCase):
 
     def test_criterio_con_nombre(self):
         con = ["AUTORÍZASE por vía de excepción al Sr. Pedro Prueba a continuar con el taxi",
-               "CONDÓNASE la deuda de la Sra. Ana Prueba",
-               "EXÍMESE al Sr. Juan Prueba del pago de la tasa",
+               "EXÍMESE al Sr. Juan Prueba de contar con estacionamientos dentro del predio",  # excepción a una norma
+               "CONDÓNASE la deuda de TCI del lote cedido a la Municipalidad por el Sr. Juan Prueba",  # motivo no social
                "la compra directa a la Sra. Rosa Prueba"]
-        sin = ["EXÍMESE al Sr. Juan Prueba en el marco del régimen general de jubilados",
+        sin = ["CONDÓNASE la deuda de la Sra. Ana Prueba",  # condonación de tasas sin motivo: sin nombre
+               "EXÍMESE al Sr. Juan Prueba del pago de la tasa",
+               "EXÍMESE al Sr. Juan Prueba en el marco del régimen general de jubilados",
                "otórgase un subsidio por excepción a la Sra. Ana Prueba",
                "AUTORÍZASE la licencia comercial del Sr. Pedro Prueba para el rubro kiosco"]
         for t in con:
@@ -77,6 +79,20 @@ class AnonimizarTest(unittest.TestCase):
                               ("Nomenclatura Catastral 15-RR-023-5322-0355. Propiedad", "Nomenclatura Catastral. Propiedad"),
                               ("dominio AA-350-PL, afectado", "dominio, afectado")):
             self.assertEqual(ic.sin_ids(raw), esperado)
+
+    def test_nombres_sin_titulo(self):
+        casos = {
+            "AUTORÍZASE a Juan PÉREZ a instalar un kiosco": "AUTORÍZASE a un vecino a instalar un kiosco",
+            "la licencia comercial cuyo titular es Ana GÓMEZ.": "la licencia comercial cuyo titular es un vecino.",
+            "propiedad de los Sres. Emir PRUEBA y Juan Manuel FALSO.-": "propiedad de vecinos.-",
+        }
+        for original, esperado in casos.items():
+            self.assertEqual(ic.anonymize(original), esperado)
+        for texto in ["Empresa TRANSERVICE S.R.L.", "Colegio FASTA", "el Ente Provincial de Energía Eléctrica EPEN",
+                      "como Anexo III forma parte", "el Intendente Carlos SALONITI", "los Sres. Concejales",
+                      "Tasa por Servicios y Contribución al Inmueble TCI", "con el vehículo Toyota ETIOS, año 2016",
+                      "a favor de la Municipalidad de San Martín de los Andes"]:
+            self.assertEqual(ic.anonymize(texto), texto)
 
     def test_cargos_y_social(self):
         self.assertTrue(ic.con_nombre("El Concejo designó a los integrantes titulares de la Junta Electoral"))

@@ -99,8 +99,10 @@ NAME_ID_PAT = re.compile(_ART + r"(?:(?:Sr|Sra|Srta)\.?\s+)?" + _NAME
 # Profesionales con título abreviado, aunque traigan más de una abreviatura ("Ing. Ftal. Juan Pérez")
 PROF_PAT = re.compile(_ART + r"(?:Ing|Arq|Lic|Dr|Dra|Prof|Cdor|Cdora|Agrim|Mg|MMO|Tec|T[ée]c)\.(?:\s*[A-Z][a-z]{1,5}\.)*\s+" + _NAME)
 # Nombre después de un rol de particular ("a favor de Juan Pérez", "representado por Ana Gómez")
+# "a favor de la Municipalidad" no es una persona
 ROLE_NAME_PAT = re.compile(r"(?P<role>a\s+favor\s+del?|representad[oa]\s+por|solicitante|titular|propietari[oa])\s+(?:el\s+|la\s+)?"
-                           r"(?:(?:Sr|Sra|Srta)\.?\s+)?(?![a-z])" + _NAME)
+                           r"(?:(?:Sr|Sra|Srta)\.?\s+)?(?![a-z])(?!(?:Municipalidad|Provincia|Estado|Iglesia|Obispado"
+                           r"|Asociaci|Club|Cooperativa|Fundaci|Junta|Escuela|Instituto|Ente)\b)" + _NAME)
 
 
 def _particular(m):
@@ -131,13 +133,14 @@ def _depersonalize(text):
 
 def privacy_level(body):
     """None si no nombra personas; si no, "privada", "actividad" o "publico" (ver los patrones). "publico" va con
-    nombre: plata pública, trato distinto al general (excepción, condonación, eximición particular) o un cargo. Antes
-    que nada, la ayuda social (subsidio, pensión): privada."""
+    nombre: plata pública, excepción a una norma o un cargo (ic.con_nombre). Antes que nada, la ayuda social
+    (subsidio, pensión, jubilados): nunca "publico". Va primero: leaks() no ve el nombre de quien se nombra."""
+    # la oración que da la excepción o la plata nombra a la persona ("honorarios… a cargo de la parte interesada", no)
+    motivo = bool(ic.MOTIVO_PAT.search(body))
+    if not ic.SOCIAL_PAT.search(body) and any(ic.con_nombre(s, motivo) and _nombra(s) for s in ic.oraciones(body)):
+        return "publico"
     if not leaks(body):
         return None
-    # la oración que da el trato o la plata nombra a la persona ("honorarios… a cargo de la parte interesada", no)
-    if not ic.SOCIAL_PAT.search(body) and any(ic.con_nombre(s) and _nombra(s) for s in ic.oraciones(body)):
-        return "publico"
     if PRIVADA_PAT.search(body):
         return "privada"
     if ACTIVIDAD_PAT.search(body):
@@ -146,7 +149,7 @@ def privacy_level(body):
 
 
 def _nombra(sentence):
-    """La oración nombra a una persona física (título, rol o documento), sin mirar si va con nombre."""
+    """La oración nombra a una persona física (título, rol, documento o Nombre APELLIDO), sin mirar si va con nombre."""
     return (bool(DNI_PAT.search(sentence)) or any(m.group(1) in PERSON_CUIT for m in CUIT_PAT.finditer(sentence))
             or ic._anonymize(sentence) != sentence or _depersonalize(sentence) != sentence)
 
